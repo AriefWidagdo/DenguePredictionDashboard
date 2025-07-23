@@ -1,12 +1,14 @@
 # File: app.py
 # The "Face" of the EWARS-ID system - Final Production Version
-# Cosmetic Update: Moves the 4-week forecast into the sidebar for a cleaner layout.
+# Data Loading Update: Now fetches data from a private GitHub repository.
 
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
+import requests 
+import io       
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -16,14 +18,36 @@ st.set_page_config(
 )
 
 # --- Caching Functions ---
+### MODIFIED ###: This function has been completely rewritten to securely load data from GitHub Privatr Repo.
 @st.cache_data
-def load_data(forecast_file, geojson_file):
+def load_data(owner, repo, forecast_path, geojson_path):
     """
-    Loads and prepares all data, returning a map-ready GDF and a full forecast DF.
+    Loads and prepares all data from a private GitHub repo,
+    returning a map-ready GDF and a full forecast DF.
     """
     try:
-        forecast_df = pd.read_csv(forecast_file, parse_dates=['forecast_week'])
-        kabupaten_gdf = gpd.read_file(geojson_file)
+        # --- Securely fetch files from GitHub ---
+        github_token = st.secrets["GITHUB_TOKEN"]
+        headers = {
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3.raw",
+        }
+        
+        # Download forecast data
+        forecast_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{forecast_path}"
+        forecast_response = requests.get(forecast_url, headers=headers)
+        forecast_response.raise_for_status()
+        
+        # Download geojson data
+        geojson_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{geojson_path}"
+        geojson_response = requests.get(geojson_url, headers=headers)
+        geojson_response.raise_for_status()
+
+        # --- Read the downloaded content ---
+        forecast_df = pd.read_csv(io.BytesIO(forecast_response.content), parse_dates=['forecast_week'])
+        kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
+        
+        # --- Processing logic  ---
         forecast_df['forecast_week_str'] = forecast_df['forecast_week'].dt.strftime('%Y-%m-%d')
         first_week_df = forecast_df.loc[forecast_df.groupby('kabupaten')['forecast_week'].idxmin()]
 
@@ -42,9 +66,16 @@ def load_data(forecast_file, geojson_file):
         
         return map_ready_gdf, forecast_df
         
-    except FileNotFoundError as e:
-        st.error(f"FATAL ERROR: A required data file was not found. Missing file: {e.filename}")
+    except requests.exceptions.RequestException as e:
+        st.error(f"FATAL ERROR: Could not fetch data from GitHub. Check your token and repo details. Error: {e}")
         return None, None
+    except KeyError:
+        st.error("FATAL ERROR: GITHUB_TOKEN not found in secrets. Please add it to your Streamlit app settings.")
+        return None, None
+    except Exception as e:
+        st.error(f"FATAL ERROR: An error occurred during data processing: {e}")
+        return None, None
+
 
 def create_map(gdf):
     """Creates the Folium map with a Choropleth and clickable popups."""
@@ -79,12 +110,18 @@ def create_map(gdf):
 # --- Main App Layout ---
 
 st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
-st.markdown("An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo.")
+st.markdown("An operational prototype for near real-time dengue fever forecasting.")
 
-FORECAST_FILE_PATH = 'multi_week_forecast.csv'
-GEOJSON_PATH = 'gadm41_IDN_2.json'
 
-map_data, full_forecast_df = load_data(FORECAST_FILE_PATH, GEOJSON_PATH)
+# --- Load Data ---
+OWNER = "AriefWidagdo"
+PRIVATE_REPO_NAME = "data-raw"
+FORECAST_FILE_PATH = "multi_week_forecast.csv"  # The path to the file inside the private repo
+GEOJSON_PATH = "gadm41_IDN_2.json"         # The path to the file inside the private repo
+
+
+map_data, full_forecast_df = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
+
 
 if map_data is not None and full_forecast_df is not None:
     
@@ -115,4 +152,4 @@ if map_data is not None and full_forecast_df is not None:
     st_folium(map_object, returned_objects=[], width='100%', height=550, key="overview_map")
 
 else:
-    st.error("Data files could not be loaded.")
+    st.error("Data files could not be loaded. Please check the logs for more information.")
