@@ -79,7 +79,7 @@ def create_map(gdf):
 # --- Main App Layout ---
 
 st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
-st.markdown("An operational prototype for near real-time dengue fever forecasting.")
+st.markdown("An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo.")
 
 FORECAST_FILE_PATH = 'multi_week_forecast.csv'
 GEOJSON_PATH = 'gadm41_IDN_2.json'
