@@ -78,7 +78,7 @@ def load_data(owner, repo, forecast_path, geojson_path):
 
 #map function using Folium's Choropleth
 def create_map(gdf):
-       m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
+    m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
 
     folium.Choropleth(
         geo_data=gdf,
