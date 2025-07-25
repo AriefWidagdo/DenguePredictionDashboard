@@ -109,7 +109,7 @@ def create_map(gdf):
 # --- Main App Layout ---
 
 st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
-st.markdown("An operational prototype for near real-time dengue fever forecasting.")
+st.markdown("An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo.")
 
 
 # --- Load Data ---
