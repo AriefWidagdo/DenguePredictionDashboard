@@ -12,7 +12,7 @@ import io
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="EWARS-ID Dengue Forecast",
+    page_title="EWARS-ID Dengue Forecast by M Arief Widagdo",
     page_icon="🇮🇩",
     layout="wide"
 )
@@ -76,10 +76,9 @@ def load_data(owner, repo, forecast_path, geojson_path):
         st.error(f"FATAL ERROR: An error occurred during data processing: {e}")
         return None, None
 
-
+#map function using Folium's Choropleth
 def create_map(gdf):
-    """Creates the Folium map with a Choropleth and clickable popups."""
-    m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
+       m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
 
     folium.Choropleth(
         geo_data=gdf,
