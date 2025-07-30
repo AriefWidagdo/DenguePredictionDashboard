@@ -115,7 +115,7 @@ st.markdown("An operational prototype for near real-time dengue fever forecastin
 # --- Load Data ---
 OWNER = "AriefWidagdo"
 PRIVATE_REPO_NAME = "data-raw"
-FORECAST_FILE_PATH = "multi_week_forecast.csv"  # The path to the file inside the private repo
+FORECAST_FILE_PATH = "january_2024_predictions.csv"  # The path to the file inside the private repo
 GEOJSON_PATH = "gadm41_IDN_2.json"         # The path to the file inside the private repo
 
 
