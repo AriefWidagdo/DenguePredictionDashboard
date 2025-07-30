@@ -1,11 +1,17 @@
-# File: app.py - Updated with robust name matching
+# File: app.py
+# The "Face" of the EWARS-ID system - Final Production Version
+# Data Loading Update: Now fetches data from a private GitHub repository.
+# Updated to use january_2024_predictions.csv and show Population & Incidence Rate.
+# Uses internal logic to convert Kabupaten_Standard names to match GeoJSON NAME_2.
+
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
-import requests
-import io
+import requests 
+import io       
+import re
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -14,38 +20,65 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- NEW: Helper Function for Name Standardization ---
-def standardize_name(name):
+# --- NEW: Robust Helper Function for Name Conversion ---
+def convert_kabupaten_standard_to_name2(kab_standard_name):
     """
-    Standardizes Indonesian administrative names to a common, prefix-less format.
-    - Converts to lowercase
-    - Removes common prefixes like 'kabupaten', 'kota', 'kab.', 'adm.', etc.
-    - Strips extra whitespace.
-    Example: 'Kabupaten Aceh Barat' -> 'aceh barat'
-             'KOTA JAMBI' -> 'jambi'
-             'Kota Administrasi Jakarta Timur' -> 'jakarta timur'
+    Converts a 'Kabupaten_Standard' name (e.g., 'AcehBarat', 'KOTA JAMBI', 'Jakarta Timur')
+    to the GADM 'NAME_2' format (e.g., 'Kabupaten Aceh Barat', 'Kota Jambi', 'Kota Administrasi Jakarta Timur').
+    
+    This version is robust and handles various input formats and special administrative names.
     """
-    if not isinstance(name, str):
+    if not isinstance(kab_standard_name, str):
         return None
-    
-    name_lower = name.lower()
-    # List of prefixes to remove, ordered to handle variations
-    prefixes = ['kota administrasi', 'kabupaten', 'kota', 'kab.', 'adm.']
-    
-    for prefix in prefixes:
-        if name_lower.startswith(prefix):
-            # Remove prefix and strip leading/trailing whitespace
-            return name_lower[len(prefix):].strip()
-            
-    return name_lower.strip()
 
+    # Step 1: Standardize the input to a predictable CamelCase format.
+    # This turns "JAKARTA TIMUR", "jakarta timur", or "Jakarta Timur" into "JakartaTimur".
+    words = kab_standard_name.strip().title().split()
+    camel_case_name = "".join(words)
+
+    # Step 2: Handle special cases and known cities that don't follow the simple "Kota/Kabupaten" rule.
+    special_cases = {
+        "Jambi": "Kota Jambi",
+        "Gunungsitoli": "Kota Gunungsitoli",
+        "Ternate": "Kota Ternate",
+        "TidoreKepulauan": "Kota Tidore Kepulauan",
+        "JakartaTimur": "Kota Administrasi Jakarta Timur",
+        "JakartaSelatan": "Kota Administrasi Jakarta Selatan",
+        "JakartaBarat": "Kota Administrasi Jakarta Barat",
+        "JakartaUtara": "Kota Administrasi Jakarta Utara",
+        "JakartaPusat": "Kota Administrasi Jakarta Pusat",
+        "Batam": "Kota Batam",
+        "Ambon": "Kota Ambon",
+        "Balikpapan": "Kota Balikpapan",
+        "Banjarmasin": "Kota Banjarmasin",
+        "BandarLampung": "Kota Bandar Lampung"
+    }
+    if camel_case_name in special_cases:
+        return special_cases[camel_case_name]
+
+    # Step 3: Apply the original logic for general cases (now on the clean camel_case_name).
+    if camel_case_name.startswith("Kota"):
+        prefix = "Kota"
+        core_name = camel_case_name[4:]
+    else:
+        prefix = "Kabupaten"
+        core_name = camel_case_name
+
+    # Insert spaces before capital letters to format the core name.
+    spaced_core_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', core_name).strip()
+
+    return f"{prefix} {spaced_core_name}"
+
+# --- Caching Functions ---
 @st.cache_data
 def load_data(owner, repo, forecast_path, geojson_path):
     """
-    Loads and prepares all data with a robust name matching strategy.
+    Loads and prepares all data from a private GitHub repo,
+    returning a map-ready GDF and a full forecast DF.
+    Converts kabupaten names internally for matching.
     """
     try:
-        # --- Fetch files from GitHub ---
+        # --- Securely fetch files from GitHub ---
         github_token = st.secrets["GITHUB_TOKEN"]
         headers = {
             "Authorization": f"token {github_token}",
@@ -60,14 +93,12 @@ def load_data(owner, repo, forecast_path, geojson_path):
         geojson_response = requests.get(geojson_url, headers=headers)
         geojson_response.raise_for_status()
 
-        # --- Read the data ---
+        # --- Read the downloaded content ---
         forecast_df = pd.read_csv(
             io.StringIO(forecast_response.text),
             parse_dates=['Date'],
             date_parser=pd.to_datetime
         )
-        
-        # Rename columns to a consistent format
         forecast_df.rename(columns={
             'Kabupaten_Standard': 'kabupaten_standard',
             'Predicted_Cases': 'predicted_cases',
@@ -76,63 +107,40 @@ def load_data(owner, repo, forecast_path, geojson_path):
         
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
         
-        # --- NEW: Create robust merge key ---
-        # Create a standardized, prefix-less key for both dataframes
-        forecast_df['merge_key'] = forecast_df['kabupaten_standard'].apply(standardize_name)
-        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'].apply(standardize_name)
-        
-        # --- Merge DataFrames ---
-        # Perform a left merge to keep all GeoJSON shapes and add forecast data where available
-        merged_gdf = kabupaten_gdf.merge(forecast_df, on='merge_key', how='left')
+        # --- Processing logic with the NEW robust Name Conversion ---
+        forecast_df['converted_name_2'] = forecast_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
 
-        # --- Debug: Show matching status ---
-        st.write("### Debug: Name Matching Status")
-        
-        # Check how many unique regions from the forecast file were successfully matched
-        forecast_regions_total = forecast_df['kabupaten_standard'].nunique()
-        matched_regions_count = merged_gdf['kabupaten_standard'].nunique()
-        
-        st.write(f"Matched forecast regions with GeoJSON: {matched_regions_count}/{forecast_regions_total}")
-        
-        # Show unmatched regions from the forecast file
-        matched_keys = set(merged_gdf.dropna(subset=['kabupaten_standard'])['merge_key'])
-        unmatched_forecast_df = forecast_df[~forecast_df['merge_key'].isin(matched_keys)]
-        unmatched_regions = unmatched_forecast_df['kabupaten_standard'].unique()
-
-        if len(unmatched_regions) > 0:
-            st.write("Unmatched forecast regions:")
-            st.write(pd.DataFrame(unmatched_regions, columns=['value']))
-
-        # --- Final Data Preparation ---
-        # Sort and get the first week's forecast for the initial map view
         forecast_df = forecast_df.sort_values(by=['kabupaten_standard', 'Date'])
         first_week_df = forecast_df.loc[forecast_df.groupby('kabupaten_standard')['Date'].idxmin()].copy()
+        first_week_df['forecast_week_str'] = first_week_df['Date'].dt.strftime('%Y-%m-%d')
+
+        # Prepare for merging
+        first_week_df['merge_key'] = first_week_df['converted_name_2']
+        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2']
         
-        # Re-merge to ensure we only have the first week's data for the initial map
-        map_ready_gdf = kabupaten_gdf.merge(first_week_df, on='merge_key', how='left')
+        merged_gdf = kabupaten_gdf.merge(first_week_df, on='merge_key', how='left')
         
-        # Fill missing values for regions in GeoJSON without forecast data
-        map_ready_gdf['predicted_cases'].fillna(0, inplace=True)
-        map_ready_gdf['population'].fillna(0, inplace=True)
+        merged_gdf['predicted_cases'].fillna(0, inplace=True)
+        merged_gdf['population'].fillna(0, inplace=True)
+        merged_gdf['kabupaten_display'] = merged_gdf['kabupaten_standard'].fillna(merged_gdf['NAME_2'])
         
-        # Use the original GeoJSON name (NAME_2) as a fallback for display
-        map_ready_gdf['kabupaten_display'] = map_ready_gdf['kabupaten_standard'].fillna(map_ready_gdf['NAME_2'])
-        
-        # Ensure forecast_week_str is available for popups
-        map_ready_gdf['forecast_week_str'] = map_ready_gdf['Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
-        
-        # Prepare final GDF for the map
+        map_ready_gdf = merged_gdf[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
         map_ready_gdf.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
         
         return map_ready_gdf, forecast_df
         
+    except requests.exceptions.RequestException as e:
+        st.error(f"FATAL ERROR: Could not fetch data from GitHub. Check token and repo details. Error: {e}")
+        return None, None
+    except KeyError as e:
+        st.error(f"FATAL ERROR: Missing key in secrets or data. Error: {e}. Check GITHUB_TOKEN or CSV column names.")
+        return None, None
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"FATAL ERROR: An error occurred during data processing: {e}")
         return None, None
 
+# Map function using Folium's Choropleth
 def create_map(gdf):
-    """Creates the Folium map with choropleth layer and popups."""
-    # Calculate incidence rate, handling potential division by zero
     gdf['incidence_rate'] = gdf.apply(
         lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
         axis=1
@@ -140,7 +148,6 @@ def create_map(gdf):
 
     m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
 
-    # Choropleth for predicted cases
     folium.Choropleth(
         geo_data=gdf,
         data=gdf,
@@ -153,17 +160,15 @@ def create_map(gdf):
         name='Predicted Cases'
     ).add_to(m)
 
-    # Create popup HTML content
     gdf['popup_html'] = gdf.apply(
         lambda row: f"""<div style="font-family: sans-serif;">
             <h4>📍 {row['kabupaten']}</h4>
-            <p><b>Forecast Week:</b> {row['forecast_week_str']}</p>
+            <p><b>Forecast Week:</b> {row.get('forecast_week_str', 'N/A')}</p>
             <p><b>Predicted Cases:</b> {int(row['predicted_cases'])}</p>
             <p><b>Population:</b> {int(row['population'])}</p>
             <p><b>Incidence Rate (/100k):</b> {row['incidence_rate']:.2f}</p>
         </div>""", axis=1)
 
-    # Invisible GeoJson layer for tooltips and popups
     folium.GeoJson(
         gdf,
         style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0},
@@ -177,7 +182,6 @@ def create_map(gdf):
 st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
 st.markdown("An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo.")
 
-# --- Load Data ---
 OWNER = "AriefWidagdo"
 PRIVATE_REPO_NAME = "data-raw"
 FORECAST_FILE_PATH = "january_2024_predictions.csv"
@@ -185,16 +189,89 @@ GEOJSON_PATH = "gadm41_IDN_2.json"
 
 map_data, full_forecast_df = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
 
-# --- Display Map and Data Table ---
 if map_data is not None and full_forecast_df is not None and not map_data.empty:
-    st.success("Data loaded and matched successfully!")
     
-    # Create and display the map
-    dengue_map = create_map(map_data)
-    st_folium(dengue_map, width='100%', height=600)
+    unique_dates = sorted(full_forecast_df['Date'].unique())
+    if unique_dates:
+        selected_date = st.selectbox(
+            "Select Forecast Date for Map View:",
+            unique_dates,
+            format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
+        )
+        
+        map_data_for_date_df = full_forecast_df[full_forecast_df['Date'] == selected_date].copy()
+        
+        # --- FIX: Apply conversion logic consistently ---
+        map_data_for_date_df['merge_key'] = map_data_for_date_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
+        
+        kabupaten_gdf_base = map_data[['geometry', 'NAME_2', 'merge_key']].drop_duplicates(subset=['merge_key'])
 
-    # Display the full forecast data in an expandable section
-    with st.expander("View Full Forecast Data Table"):
-        st.dataframe(full_forecast_df)
+        map_ready_gdf_for_date = kabupaten_gdf_base.merge(map_data_for_date_df, on='merge_key', how='left')
+        
+        map_ready_gdf_for_date['predicted_cases'].fillna(0, inplace=True)
+        map_ready_gdf_for_date['population'].fillna(0, inplace=True)
+        map_ready_gdf_for_date['kabupaten_display'] = map_ready_gdf_for_date['kabupaten_standard'].fillna(map_ready_gdf_for_date['NAME_2'])
+        map_ready_gdf_for_date['forecast_week_str'] = selected_date.strftime('%Y-%m-%d')
+        
+        map_ready_gdf_for_date = map_ready_gdf_for_date[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
+        map_ready_gdf_for_date.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
+
+    else:
+        st.warning("No forecast dates found in the data.")
+        selected_date = None
+        map_ready_gdf_for_date = map_data
+
+    st.sidebar.header("Forecast Trajectory")
+    kabupaten_list = sorted(full_forecast_df['kabupaten_standard'].unique())
+    selected_kabupaten = st.sidebar.selectbox("Select a Kabupaten/Kota:", kabupaten_list)
+    
+    st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
+    trajectory_df = full_forecast_df[full_forecast_df['kabupaten_standard'] == selected_kabupaten].copy()
+    
+    if not trajectory_df.empty and 'population' in trajectory_df.columns and trajectory_df['population'].iloc[0] > 0:
+        population_for_kab = trajectory_df['population'].iloc[0]
+        trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000
+    else:
+        trajectory_df['incidence_rate'] = 0
+    
+    chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
+    st.sidebar.line_chart(chart_df, y='predicted_cases')
+    
+    display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
+    display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+    display_df.rename(columns={
+        'Date': 'Week',
+        'predicted_cases': 'Forecast Cases',
+        'incidence_rate': 'Incidence Rate (/100k)'
+    }, inplace=True)
+    st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
+
+    st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'Next Week'})")
+    if selected_date:
+        map_object = create_map(map_ready_gdf_for_date)
+    else:
+        map_object = create_map(map_data)
+    st_folium(map_object, returned_objects=[], width='100%', height=550, key="overview_map")
+
+    if selected_date and not map_ready_gdf_for_date.empty:
+        top10_df = map_ready_gdf_for_date.nlargest(10, 'predicted_cases')[['kabupaten', 'predicted_cases', 'population']]
+        top10_df['incidence_rate'] = top10_df.apply(
+            lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
+            axis=1
+        )
+        top10_df_display = top10_df[['kabupaten', 'predicted_cases', 'incidence_rate']].copy()
+        top10_df_display.rename(columns={
+            'kabupaten': 'Region',
+            'predicted_cases': 'Predicted Cases',
+            'incidence_rate': 'Incidence Rate (/100k)'
+        }, inplace=True)
+        st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
+        st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
+    else:
+        st.info("Select a date to view the Top 10 regions.")
+
 else:
-    st.error("Could not load or process the data. Please check the debug messages above.")
+    if map_data is not None and (map_data.empty or map_data['predicted_cases'].fillna(0).sum() == 0):
+         st.error("Data files loaded, but no forecast data could be matched to map regions. Please check the name conversion logic or data formats.")
+    else:
+         st.error("Data files could not be loaded. Please check the logs for more information.")
