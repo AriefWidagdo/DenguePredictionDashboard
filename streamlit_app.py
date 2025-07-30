@@ -1,6 +1,6 @@
 # File: streamlit_app.py
 # The "Face" of the EWARS-ID system - Final Production Version
-# FINAL FIX: Resolves JSON serialization error and data loading warnings.
+# FINAL FIXES: Resolves JSON serialization error, data loading warnings, and excessive re-runs.
 
 import streamlit as st
 import pandas as pd
@@ -17,6 +17,13 @@ st.set_page_config(
     page_icon="🇮🇩",
     layout="wide"
 )
+
+# --- Session State Initialization ---
+# Use session state to store loaded data and avoid re-fetching on every interaction
+if 'loaded_data' not in st.session_state:
+    st.session_state.loaded_data = None
+if 'loaded_forecast' not in st.session_state:
+    st.session_state.loaded_forecast = None
 
 # --- Helper Function for Name Standardization ---
 @st.cache_data
@@ -52,6 +59,7 @@ def load_data(owner, repo, forecast_path, geojson_path):
             "Accept": "application/vnd.github.v3.raw",
         }
         
+        # --- FIX: Corrected the URL construction by removing extra spaces ---
         forecast_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{forecast_path}"
         forecast_response = requests.get(forecast_url, headers=headers)
         forecast_response.raise_for_status()
@@ -61,7 +69,7 @@ def load_data(owner, repo, forecast_path, geojson_path):
         geojson_response.raise_for_status()
 
         # --- Read the downloaded content ---
-        # FIX: Removed deprecated 'date_parser' argument. 'parse_dates' is sufficient.
+        # FIX: Removed deprecated 'date_parser' argument.
         forecast_df = pd.read_csv(
             io.StringIO(forecast_response.text),
             parse_dates=['Date']
@@ -92,10 +100,10 @@ def create_map(gdf):
     Creates the Folium map with a choropleth layer and popups.
     This version prevents the JSON serialization error.
     """
+    # Work on a copy to avoid modifying the original data
     map_gdf = gdf.copy()
 
     # --- CRITICAL FIX: Convert Date column to string BEFORE passing to Folium ---
-    # This prevents the "TypeError: Object of type Timestamp is not JSON serializable" error.
     if 'Date' in map_gdf.columns and pd.api.types.is_datetime64_any_dtype(map_gdf['Date']):
         map_gdf['forecast_week_str'] = map_gdf['Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
         # Drop the original timestamp column as it's no longer needed and causes the error
@@ -124,7 +132,7 @@ def create_map(gdf):
         line_opacity=0.3,
         legend_name='Predicted Dengue Cases (Next Week)',
         name='Predicted Cases',
-        nan_fill_color='white'
+        nan_fill_color='lightgray' # Make missing data more visible
     ).add_to(m)
 
     # Generate popup HTML using the string date and numeric values
@@ -133,7 +141,7 @@ def create_map(gdf):
             <h4>📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
             <p><b>Forecast Week:</b> {row['forecast_week_str']}</p>
             <p><b>Predicted Cases:</b> {int(row['predicted_cases_numeric'])}</p>
-            <p><b>Population:</b> {int(row['population_numeric'])}</p>
+            <p><b>Population:</b> {int(row['population_numeric']) if not pd.isna(row['population_numeric']) else 'N/A'}</p>
             <p><b>Incidence Rate (/100k):</b> {row['incidence_rate']:.2f}</p>
         </div>""", axis=1)
 
@@ -155,18 +163,39 @@ PRIVATE_REPO_NAME = "data-raw"
 FORECAST_FILE_PATH = "january_2024_predictions.csv"
 GEOJSON_PATH = "gadm41_IDN_2.json"
 
-merged_data, forecast_data = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
+# --- Load Data Once ---
+# Check session state first, then load if needed
+if st.session_state.loaded_data is None or st.session_state.loaded_forecast is None:
+    with st.spinner("Loading data from GitHub..."):
+        merged_data, forecast_data = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
+        st.session_state.loaded_data = merged_data
+        st.session_state.loaded_forecast = forecast_data
+else:
+    merged_data = st.session_state.loaded_data
+    forecast_data = st.session_state.loaded_forecast
 
 if merged_data is not None and forecast_data is not None:
     
     unique_dates = sorted(forecast_data['Date'].unique())
     
     if unique_dates:
-        selected_date = st.selectbox(
+        # Use session state for the selected date to avoid resetting on map interaction
+        if 'selected_date' not in st.session_state:
+            st.session_state.selected_date = unique_dates[0] # Default to first date
+        
+        # Update session state only when user selects a new date
+        selected_date_from_selectbox = st.selectbox(
             "Select Forecast Date for Map View:",
             unique_dates,
+            index=unique_dates.index(st.session_state.selected_date) if st.session_state.selected_date in unique_dates else 0,
             format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
         )
+        
+        # Only update session state if the selection actually changed
+        if selected_date_from_selectbox != st.session_state.selected_date:
+            st.session_state.selected_date = selected_date_from_selectbox
+
+        selected_date = st.session_state.selected_date
         
         # Filter the merged data for the selected date, keeping unmatched regions for a full map
         map_ready_gdf = merged_data[
@@ -181,48 +210,92 @@ if merged_data is not None and forecast_data is not None:
     # --- Sidebar Controls ---
     st.sidebar.header("Forecast Trajectory")
     kabupaten_list = sorted(forecast_data['kabupaten_standard'].unique())
-    selected_kabupaten = st.sidebar.selectbox("Select a Kabupaten/Kota:", kabupaten_list)
     
-    st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
-    trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
+    # Use session state for selected kabupaten in sidebar too
+    if 'selected_kabupaten' not in st.session_state:
+         st.session_state.selected_kabupaten = kabupaten_list[0] if kabupaten_list else None
+
+    selected_kabupaten_from_selectbox = st.sidebar.selectbox(
+        "Select a Kabupaten/Kota:",
+        kabupaten_list,
+        index=kabupaten_list.index(st.session_state.selected_kabupaten) if st.session_state.selected_kabupaten in kabupaten_list else 0
+    )
     
-    if not trajectory_df.empty:
-        population_for_kab = trajectory_df['population'].iloc[0]
-        trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000 if population_for_kab > 0 else 0
+    if selected_kabupaten_from_selectbox != st.session_state.selected_kabupaten:
+        st.session_state.selected_kabupaten = selected_kabupaten_from_selectbox
+
+    selected_kabupaten = st.session_state.selected_kabupaten
+    
+    if selected_kabupaten:
+        st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
+        trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
         
-        chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
-        st.sidebar.line_chart(chart_df, y='predicted_cases')
-        
-        display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
-        display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-        display_df.rename(columns={'Date': 'Week', 'predicted_cases': 'Forecast Cases', 'incidence_rate': 'Incidence Rate (/100k)'}, inplace=True)
-        st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
+        if not trajectory_df.empty:
+            population_for_kab = pd.to_numeric(trajectory_df['population'].iloc[0], errors='coerce')
+            if pd.notna(population_for_kab) and population_for_kab > 0:
+                trajectory_df['incidence_rate'] = (pd.to_numeric(trajectory_df['predicted_cases'], errors='coerce') / population_for_kab) * 100000
+            else:
+                trajectory_df['incidence_rate'] = 0
+            
+            chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
+            # Ensure predicted_cases is numeric for the chart
+            chart_df['predicted_cases'] = pd.to_numeric(chart_df['predicted_cases'], errors='coerce')
+            st.sidebar.line_chart(chart_df, y='predicted_cases')
+            
+            display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
+            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+            display_df.rename(columns={
+                'Date': 'Week',
+                'predicted_cases': 'Forecast Cases',
+                'incidence_rate': 'Incidence Rate (/100k)'
+            }, inplace=True)
+            # Ensure columns are of correct type for display
+            display_df['Forecast Cases'] = pd.to_numeric(display_df['Forecast Cases'], errors='coerce')
+            st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
 
     # --- Main Map Section ---
     st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'})")
     
-    # Use a dynamic key for the map to force re-render on date change
+    # --- KEY FIX: Use `returned_objects=[]` and a stable key ---
+    # Setting `returned_objects=[]` tells st_folium we don't need interaction data back,
+    # which can sometimes prevent re-runs. A stable key based on the *data* helps too,
+    # but we use the selected date which changes when needed.
     map_object = create_map(map_ready_gdf)
-    st_folium(map_object, width='100%', height=550, key=f"map_{selected_date}")
+    st_folium(
+        map_object,
+        width='100%',
+        height=550,
+        key=f"map_{selected_date.strftime('%Y%m%d') if selected_date else 'default'}",
+        returned_objects=[] # Crucial for preventing re-runs on interaction
+    )
 
     # --- Top 10 Regions Section ---
     if selected_date:
         # Create a clean dataframe for top 10 calculation
         top10_df = map_ready_gdf[map_ready_gdf['predicted_cases'].notna()].copy()
-        top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'])
-        top10_df['population'] = pd.to_numeric(top10_df['population'])
+        top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'], errors='coerce')
+        top10_df['population'] = pd.to_numeric(top10_df['population'], errors='coerce')
         
-        top10_df = top10_df.nlargest(10, 'predicted_cases')
-        
-        if not top10_df.empty:
-            top10_df['incidence_rate'] = top10_df.apply(
+        top10_df_clean = top10_df.dropna(subset=['predicted_cases']).copy()
+        if not top10_df_clean.empty:
+            top10_df_clean = top10_df_clean.nlargest(10, 'predicted_cases')
+            
+            top10_df_clean['incidence_rate'] = top10_df_clean.apply(
                 lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
                 axis=1
             )
-            top10_df_display = top10_df[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
-            top10_df_display.rename(columns={'NAME_2': 'Region', 'predicted_cases': 'Predicted Cases', 'incidence_rate': 'Incidence Rate (/100k)'}, inplace=True)
+            top10_df_display = top10_df_clean[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
+            top10_df_display.rename(columns={
+                'NAME_2': 'Region',
+                'predicted_cases': 'Predicted Cases',
+                'incidence_rate': 'Incidence Rate (/100k)'
+            }, inplace=True)
+            # Ensure numeric types for display
+            top10_df_display['Predicted Cases'] = top10_df_display['Predicted Cases'].astype(int)
             st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
             st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
+        else:
+            st.info("No valid data available for the Top 10 list for the selected date.")
 
 else:
     st.error("Data files could not be loaded. Please check deployment logs for more information.")
