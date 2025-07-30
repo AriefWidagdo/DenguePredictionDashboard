@@ -2,6 +2,7 @@
 # The "Face" of the EWARS-ID system - Final Production Version
 # Data Loading Update: Now fetches data from a private GitHub repository.
 # Updated to use january_2024_predictions.csv and show Population & Incidence Rate.
+# Uses RapidFuzz for matching Kabupaten_Standard to NAME_2.
 
 import streamlit as st
 import pandas as pd
@@ -10,6 +11,8 @@ import folium
 from streamlit_folium import st_folium
 import requests 
 import io       
+# --- Import RapidFuzz ---
+from rapidfuzz import process, fuzz
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -24,6 +27,7 @@ def load_data(owner, repo, forecast_path, geojson_path):
     """
     Loads and prepares all data from a private GitHub repo,
     returning a map-ready GDF and a full forecast DF.
+    Uses RapidFuzz to match kabupaten names.
     """
     try:
         # --- Securely fetch files from GitHub ---
@@ -59,30 +63,64 @@ def load_data(owner, repo, forecast_path, geojson_path):
         
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
         
-        # --- Processing logic  ---
-        # --- UPDATED: Use 'Date' column for sorting ---
-        forecast_df = forecast_df.sort_values(by=['kabupaten', 'Date'])
+        # --- Processing logic with Fuzzy Matching ---
+        
+        # Get unique lists of names
+        csv_kabupaten_names = forecast_df['kabupaten'].unique().tolist()
+        geojson_kabupaten_names = kabupaten_gdf['NAME_2'].unique().tolist()
+
+        # Create a mapping dictionary using RapidFuzz
+        name_mapping = {}
+        unmatched_from_csv = []
+        threshold = 90 # Minimum similarity score to consider a match
+
+        for csv_name in csv_kabupaten_names:
+            # Find the best match in the GeoJSON names
+            best_match, score, _ = process.extractOne(csv_name, geojson_kabupaten_names, scorer=fuzz.WRatio)
+            if score >= threshold:
+                name_mapping[csv_name] = best_match
+            else:
+                unmatched_from_csv.append(csv_name)
+                # Optionally, map unmatched names to None or a placeholder
+                name_mapping[csv_name] = None 
+
+        # Report unmatched names
+        if unmatched_from_csv:
+            st.warning(f"Could not find high-confidence matches for {len(unmatched_from_csv)} kabupaten/kota names from the CSV using fuzzy matching (threshold={threshold}). They will not appear on the map.")
+            # Optionally, display the list in an expander for debugging
+            # with st.expander("Unmatched CSV Names"):
+            #     st.write(unmatched_from_csv)
+
+        # Add the matched GeoJSON name to the forecast dataframe
+        forecast_df['matched_name_2'] = forecast_df['kabupaten'].map(name_mapping)
+
+        # Filter out rows where matching failed
+        forecast_df_matched = forecast_df.dropna(subset=['matched_name_2']).copy()
+
+        # Sort by kabupaten and Date
+        forecast_df_matched = forecast_df_matched.sort_values(by=['kabupaten', 'Date'])
         # Take the first forecast date for each kabupaten for the map (assumes first is the primary forecast week)
-        first_week_df = forecast_df.loc[forecast_df.groupby('kabupaten')['Date'].idxmin()].copy()
+        first_week_df = forecast_df_matched.loc[forecast_df_matched.groupby('kabupaten')['Date'].idxmin()].copy()
         # Add a column for the forecast week string for display
         first_week_df['forecast_week_str'] = first_week_df['Date'].dt.strftime('%Y-%m-%d')
 
-        def standardize_name(name):
-            return str(name).upper().strip().replace("KABUPATEN ", "").replace("KOTA ", "")
-
-        first_week_df['merge_key'] = first_week_df['kabupaten'].apply(standardize_name)
-        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'].apply(standardize_name)
+        # Prepare GeoDataFrame for merging
+        # Use the matched NAME_2 from the CSV as the key
+        first_week_df['merge_key'] = first_week_df['matched_name_2'] 
+        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'] # Use NAME_2 directly from GeoJSON
         
         merged_gdf = kabupaten_gdf.merge(first_week_df, on='merge_key', how='left')
         
         merged_gdf['predicted_cases'] = merged_gdf['predicted_cases'].fillna(0)
         merged_gdf['population'] = merged_gdf['population'].fillna(0) # Fill population as well
-        merged_gdf['kabupaten'] = merged_gdf['kabupaten'].fillna(merged_gdf['NAME_2'])
+        # kabupaten name can come from either source, prefer the original standardized one
+        merged_gdf['kabupaten_display'] = merged_gdf['kabupaten'].fillna(merged_gdf['NAME_2']) 
         
-        # --- UPDATED: Include 'population' in the map-ready GDF ---
-        map_ready_gdf = merged_gdf[['geometry', 'merge_key', 'kabupaten', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']]
+        # --- UPDATED: Include 'population' and 'matched_name_2' in the map-ready GDF ---
+        map_ready_gdf = merged_gdf[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
+        map_ready_gdf.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True) # Rename for consistency downstream
         
-        return map_ready_gdf, forecast_df
+        return map_ready_gdf, forecast_df_matched # Return the matched forecast data
         
     except requests.exceptions.RequestException as e:
         st.error(f"FATAL ERROR: Could not fetch data from GitHub. Check your token and repo details. Error: {e}")
@@ -168,17 +206,41 @@ if map_data is not None and full_forecast_df is not None:
         map_data_for_date = full_forecast_df[full_forecast_df['Date'] == selected_date].copy()
         
         # Need to merge this filtered data with the GeoJSON GDF again for mapping
-        def standardize_name(name):
-            return str(name).upper().strip().replace("KABUPATEN ", "").replace("KOTA ", "")
-        
-        map_data_for_date['merge_key'] = map_data_for_date['kabupaten'].apply(standardize_name)
-        kabupaten_gdf = map_data[['geometry', 'merge_key', 'NAME_2']].drop_duplicates() # Get base GDF
-        map_ready_gdf_for_date = kabupaten_gdf.merge(map_data_for_date, on='merge_key', how='left')
+        # Re-run the matching logic or reuse the mapping if names are consistent per date
+        # Simpler approach: Re-merge the filtered data with the base GeoJSON GDF
+        kabupaten_gdf_base = map_data[['geometry', 'NAME_2']].drop_duplicates() # Get base GDF geometry and NAME_2
+        # --- Fuzzy Matching for the selected date data ---
+        csv_kabupaten_names_for_date = map_data_for_date['kabupaten'].unique().tolist()
+        geojson_kabupaten_names_base = kabupaten_gdf_base['NAME_2'].unique().tolist()
+
+        name_mapping_for_date = {}
+        threshold = 90
+        for csv_name in csv_kabupaten_names_for_date:
+             # Use the already found match if available, otherwise re-match (less efficient but robust)
+             # Let's assume name_mapping is not easily accessible here, so re-match
+             # A more efficient way would be to pass the name_mapping from load_data or store it.
+             # For simplicity, re-running matching here.
+            best_match, score, _ = process.extractOne(csv_name, geojson_kabupaten_names_base, scorer=fuzz.WRatio)
+            if score >= threshold:
+                name_mapping_for_date[csv_name] = best_match
+            else:
+                 # Handle unmatched - perhaps skip or use original (risk of mismatch)
+                 # Let's skip for map view if no good match
+                 name_mapping_for_date[csv_name] = None
+
+        map_data_for_date['matched_name_2'] = map_data_for_date['kabupaten'].map(name_mapping_for_date)
+        map_data_for_date_filtered = map_data_for_date.dropna(subset=['matched_name_2'])
+
+        # Merge with base GDF
+        map_data_for_date_filtered['merge_key'] = map_data_for_date_filtered['matched_name_2']
+        kabupaten_gdf_base['merge_key'] = kabupaten_gdf_base['NAME_2']
+        map_ready_gdf_for_date = kabupaten_gdf_base.merge(map_data_for_date_filtered, on='merge_key', how='left')
         map_ready_gdf_for_date['predicted_cases'] = map_ready_gdf_for_date['predicted_cases'].fillna(0)
         map_ready_gdf_for_date['population'] = map_ready_gdf_for_date['population'].fillna(0)
-        map_ready_gdf_for_date['kabupaten'] = map_ready_gdf_for_date['kabupaten'].fillna(map_ready_gdf_for_date['NAME_2'])
+        map_ready_gdf_for_date['kabupaten_display'] = map_ready_gdf_for_date['kabupaten'].fillna(map_ready_gdf_for_date['NAME_2'])
         map_ready_gdf_for_date['forecast_week_str'] = selected_date.strftime('%Y-%m-%d')
-        map_ready_gdf_for_date = map_ready_gdf_for_date[['geometry', 'merge_key', 'kabupaten', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']]
+        map_ready_gdf_for_date = map_ready_gdf_for_date[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
+        map_ready_gdf_for_date.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
 
     else:
         st.warning("No forecast dates found in the data.")
@@ -188,6 +250,7 @@ if map_data is not None and full_forecast_df is not None:
     # --- NEW LAYOUT: ALL CONTROLS AND CHARTS IN THE SIDEBAR ---
     st.sidebar.header("Forecast Trajectory")
     
+    # Use kabupaten names from the full forecast data for the selector
     kabupaten_list = sorted(full_forecast_df['kabupaten'].unique())
     selected_kabupaten = st.sidebar.selectbox(
         "Select a Kabupaten/Kota to inspect its forecast:",
@@ -217,7 +280,7 @@ if map_data is not None and full_forecast_df is not None:
 
     # --- Main Map Section ---
     st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'Next Week'})")
-    if selected_date:
+    if selected_date and not map_ready_gdf_for_date.empty:
         map_object = create_map(map_ready_gdf_for_date)
     else:
         map_object = create_map(map_data) # Fallback
@@ -225,6 +288,7 @@ if map_data is not None and full_forecast_df is not None:
 
     # --- Top 10 Regions Section ---
     if selected_date and not map_ready_gdf_for_date.empty:
+        # Use the data for the selected date for top 10
         top10_df = map_ready_gdf_for_date.nlargest(10, 'predicted_cases')[['kabupaten', 'predicted_cases', 'population']]
         # Calculate incidence rate for top 10 as well
         top10_df['incidence_rate'] = top10_df.apply(
