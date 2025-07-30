@@ -20,60 +20,82 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- NEW: More Robust Helper Function for Name Conversion ---
+# --- NEW: Final, Robust Helper Function for Name Conversion ---
 def convert_kabupaten_standard_to_name2(kab_standard_name):
     """
-    Converts a 'Kabupaten_Standard' name (e.g., 'AcehBarat', 'KOTA JAMBI', 'Bekasi')
-    to the GADM 'NAME_2' format (e.g., 'Kabupaten Aceh Barat', 'Kota Jambi', 'Kota Bekasi').
-
-    This version is robust and handles various input formats and special administrative names.
+    Converts a 'Kabupaten_Standard' name to the GADM 'NAME_2' format with high accuracy,
+    using a comprehensive dictionary for special cases and a fallback for general names.
     """
     if not isinstance(kab_standard_name, str):
         return None
 
-    # Step 1: Standardize the input to a predictable CamelCase format.
-    words = kab_standard_name.strip().title().split()
-    camel_case_name = "".join(words)
+    # Step 1: Standardize the input name to TitleCase with no spaces for consistent dictionary keys.
+    # Example: "kota bandung", "KotaBandung", "KOTA BANDUNG" all become "KotaBandung".
+    name_key = "".join(word.title() for word in kab_standard_name.strip().split())
 
-    # Step 2: Handle special cases and known cities/regencies that need explicit mapping.
-    # This is crucial for distinguishing between cities and regencies with the same core name.
+    # Step 2: Use a comprehensive dictionary for all known special cases, ambiguities, and cities.
+    # This is the most reliable way to ensure accurate mapping.
     special_cases = {
-        # FIX: Explicitly map "Bekasi" to "Kota Bekasi" and add "KabupatenBekasi"
-        "Bekasi": "Kota Bekasi",
-        "KabupatenBekasi": "Kabupaten Bekasi",
-        "Bogor": "Kota Bogor",
-        "KabupatenBogor": "Kabupaten Bogor",
-        "Jambi": "Kota Jambi",
-        "Gunungsitoli": "Kota Gunungsitoli",
-        "Ternate": "Kota Ternate",
-        "TidoreKepulauan": "Kota Tidore Kepulauan",
-        "JakartaTimur": "Kota Administrasi Jakarta Timur",
-        "JakartaSelatan": "Kota Administrasi Jakarta Selatan",
-        "JakartaBarat": "Kota Administrasi Jakarta Barat",
-        "JakartaUtara": "Kota Administrasi Jakarta Utara",
-        "JakartaPusat": "Kota Administrasi Jakarta Pusat",
-        "Batam": "Kota Batam",
-        "Ambon": "Kota Ambon",
-        "Balikpapan": "Kota Balikpapan",
-        "Banjarmasin": "Kota Banjarmasin",
-        "BandarLampung": "Kota Bandar Lampung"
-        # Add other known city/regency pairs here as needed
+        # Cities that are just a name (no "Kota" prefix in source)
+        "Ambon": "Kota Ambon", "Balikpapan": "Kota Balikpapan", "BandaAceh": "Kota Banda Aceh",
+        "BandarLampung": "Kota Bandar Lampung", "Banjarmasin": "Kota Banjarmasin", "Batam": "Kota Batam",
+        "Bau-Bau": "Kota Bau-Bau", "Bekasi": "Kabupaten Bekasi", # Note: "Bekasi" is the Regency
+        "Bengkulu": "Kota Bengkulu", "Bima": "Kabupaten Bima", # Note: "Bima" is the Regency
+        "Binjai": "Kota Binjai", "Bitung": "Kota Bitung", "Blitar": "Kabupaten Blitar",
+        "Bogor": "Kabupaten Bogor", "Bontang": "Kota Bontang", "Bukittinggi": "Kota Bukittinggi",
+        "Cilegon": "Kota Cilegon", "Cimahi": "Kota Cimahi", "Cirebon": "Kabupaten Cirebon",
+        "Denpasar": "Kota Denpasar", "Depok": "Kota Depok", "Dumai": "Kota Dumai",
+        "Gorontalo": "Kabupaten Gorontalo", "Gunungsitoli": "Kota Gunungsitoli", "Jambi": "Kota Jambi",
+        "Jayapura": "Kabupaten Jayapura", "Kediri": "Kabupaten Kediri", "Kendari": "Kota Kendari",
+        "Kupang": "Kabupaten Kupang", "Langsa": "Kota Langsa", "Lhokseumawe": "Kota Lhokseumawe",
+        "Lubuklinggau": "Kota Lubuklinggau", "Madiun": "Kabupaten Madiun", "Magelang": "Kabupaten Magelang",
+        "Makassar": "Kota Makassar", "Malang": "Kabupaten Malang", "Manado": "Kota Manado",
+        "Mataram": "Kota Mataram", "Medan": "Kota Medan", "Metro": "Kota Metro",
+        "Mojokerto": "Kabupaten Mojokerto", "Padang": "Kota Padang", "Padangsidimpuan": "Kota Padangsidimpuan",
+        "PagarAlam": "Kota Pagar Alam", "PalangkaRaya": "Kota Palangka Raya", "Palembang": "Kota Palembang",
+        "Palopo": "Kota Palopo", "Palu": "Kota Palu", "Pangkalpinang": "Kota Pangkalpinang",
+        "Parepare": "Kota Parepare", "Pariaman": "Kota Pariaman", "Pasuruan": "Kabupaten Pasuruan",
+        "Payakumbuh": "Kota Payakumbuh", "Pekalongan": "Kabupaten Pekalongan", "Pekanbaru": "Kota Pekanbaru",
+        "Pematangsiantar": "Kota Pematangsiantar", "Pontianak": "Kabupaten Pontianak",
+        "Prabumulih": "Kota Prabumulih", "Probolinggo": "Kabupaten Probolinggo", "Sabang": "Kota Sabang",
+        "Salatiga": "Kota Salatiga", "Samarinda": "Kota Samarinda", "Sawahlunto": "Kota Sawahlunto",
+        "Semarang": "Kabupaten Semarang", "Serang": "Kabupaten Serang", "SiauTagulandangBiaro": "Kabupaten Siau Tagulandang Biaro",
+        "Sibolga": "Kota Sibolga", "Singkawang": "Kota Singkawang", "Solok": "Kabupaten Solok",
+        "Sorong": "Kabupaten Sorong", "Subulussalam": "Kota Subulussalam", "Sukabumi": "Kabupaten Sukabumi",
+        "SungaiPenuh": "Kota Sungai Penuh", "Surabaya": "Kota Surabaya", "Surakarta": "Kota Surakarta",
+        "Tangerang": "Kabupaten Tangerang", "TangerangSelatan": "Kota Tangerang Selatan",
+        "Tanjungbalai": "Kota Tanjungbalai", "Tanjungpinang": "Kota Tanjungpinang", "Tapin": "Kabupaten Tapin",
+        "Tarakan": "Kota Tarakan", "Tasikmalaya": "Kabupaten Tasikmalaya", "Tebingtinggi": "Kota Tebing Tinggi",
+        "Tegal": "Kabupaten Tegal", "Ternate": "Kota Ternate", "TidoreKepulauan": "Kota Tidore Kepulauan",
+        "Tomohon": "Kota Tomohon", "Tual": "Kota Tual", "Yogyakarta": "Kota Yogyakarta",
+
+        # Jakarta Special Administrative Cities
+        "JakartaBarat": "Kota Administrasi Jakarta Barat", "JakartaPusat": "Kota Administrasi Jakarta Pusat",
+        "JakartaSelatan": "Kota Administrasi Jakarta Selatan", "JakartaTimur": "Kota Administrasi Jakarta Timur",
+        "JakartaUtara": "Kota Administrasi Jakarta Utara", "KepulauanSeribu": "Kabupaten Administrasi Kepulauan Seribu",
+        
+        # Explicit "Kota" prefixed names from your list
+        "KotaBandung": "Kota Bandung", "KotaBekasi": "Kota Bekasi", "KotaBima": "Kota Bima",
+        "KotaBinjai": "Kota Binjai", "KotaBlitar": "Kota Blitar", "KotaBogor": "Kota Bogor",
+        "KotaCirebon": "Kota Cirebon", "KotaGorontalo": "Kota Gorontalo", "KotaJayapura": "Kota Jayapura",
+        "KotaKediri": "Kota Kediri", "KotaKupang": "Kota Kupang", "KotaMadiun": "Kota Madiun",
+        "KotaMagelang": "Kota Magelang", "KotaMalang": "Kota Malang", "KotaMojokerto": "Kota Mojokerto",
+        "KotaPasuruan": "Kota Pasuruan", "KotaPekalongan": "Kota Pekalongan", "KotaPontianak": "Kota Pontianak",
+        "KotaProbolinggo": "Kota Probolinggo", "KotaSemarang": "Kota Semarang", "KotaSerang": "Kota Serang",
+        "KotaSolok": "Kota Solok", "KotaSorong": "Kota Sorong", "KotaSukabumi": "Kota Sukabumi",
+        "KotaTangerang": "Kota Tangerang", "KotaTanjungbalai": "Kota Tanjungbalai",
+        "KotaTasikmalaya": "Kota Tasikmalaya", "KotaTegal": "Kota Tegal", "KotaYogyakarta": "Kota Yogyakarta",
+        "Kotamobagu": "Kota Kotamobagu",
     }
-    if camel_case_name in special_cases:
-        return special_cases[camel_case_name]
+    
+    if name_key in special_cases:
+        return special_cases[name_key]
 
-    # Step 3: Apply the original logic for general cases (now on the clean camel_case_name).
-    if camel_case_name.startswith("Kota"):
-        prefix = "Kota"
-        core_name = camel_case_name[4:]
-    else:
-        prefix = "Kabupaten"
-        core_name = camel_case_name
+    # Step 3: If not a special case, apply the general rule. Assume it's a Kabupaten.
+    # This now correctly handles names like "AcehBarat" -> "Kabupaten Aceh Barat".
+    spaced_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', name_key).strip()
+    return f"Kabupaten {spaced_name}"
 
-    # Insert spaces before capital letters to format the core name.
-    spaced_core_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', core_name).strip()
-
-    return f"{prefix} {spaced_core_name}"
 
 # --- Caching Functions ---
 @st.cache_data
@@ -90,11 +112,11 @@ def load_data(owner, repo, forecast_path, geojson_path):
             "Authorization": f"token {github_token}",
             "Accept": "application/vnd.github.v3.raw",
         }
-
+        
         forecast_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{forecast_path}"
         forecast_response = requests.get(forecast_url, headers=headers)
         forecast_response.raise_for_status()
-
+        
         geojson_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{geojson_path}"
         geojson_response = requests.get(geojson_url, headers=headers)
         geojson_response.raise_for_status()
@@ -110,9 +132,9 @@ def load_data(owner, repo, forecast_path, geojson_path):
             'Predicted_Cases': 'predicted_cases',
             'Population': 'population'
         }, inplace=True)
-
+        
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
-
+        
         # --- Processing logic with the NEW robust Name Conversion ---
         forecast_df['converted_name_2'] = forecast_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
 
@@ -123,18 +145,18 @@ def load_data(owner, repo, forecast_path, geojson_path):
         # Prepare for merging
         first_week_df['merge_key'] = first_week_df['converted_name_2']
         kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2']
-
+        
         merged_gdf = kabupaten_gdf.merge(first_week_df, on='merge_key', how='left')
-
+        
         merged_gdf['predicted_cases'].fillna(0, inplace=True)
         merged_gdf['population'].fillna(0, inplace=True)
         merged_gdf['kabupaten_display'] = merged_gdf['kabupaten_standard'].fillna(merged_gdf['NAME_2'])
-
+        
         map_ready_gdf = merged_gdf[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
         map_ready_gdf.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
-
+        
         return map_ready_gdf, forecast_df
-
+        
     except requests.exceptions.RequestException as e:
         st.error(f"FATAL ERROR: Could not fetch data from GitHub. Check token and repo details. Error: {e}")
         return None, None
@@ -181,7 +203,7 @@ def create_map(gdf):
         tooltip=folium.features.GeoJsonTooltip(fields=['kabupaten'], aliases=['Region:']),
         popup=folium.features.GeoJsonPopup(fields=['popup_html'], aliases=[''])
     ).add_to(m)
-
+    
     return m
 
 # --- Main App Layout ---
@@ -196,7 +218,7 @@ GEOJSON_PATH = "gadm41_IDN_2.json"
 map_data, full_forecast_df = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
 
 if map_data is not None and full_forecast_df is not None and not map_data.empty:
-
+    
     unique_dates = sorted(full_forecast_df['Date'].unique())
     if unique_dates:
         selected_date = st.selectbox(
@@ -204,20 +226,20 @@ if map_data is not None and full_forecast_df is not None and not map_data.empty:
             unique_dates,
             format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
         )
-
+        
         map_data_for_date_df = full_forecast_df[full_forecast_df['Date'] == selected_date].copy()
-
+        
         map_data_for_date_df['merge_key'] = map_data_for_date_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
-
+        
         kabupaten_gdf_base = map_data[['geometry', 'NAME_2', 'merge_key']].drop_duplicates(subset=['merge_key'])
 
         map_ready_gdf_for_date = kabupaten_gdf_base.merge(map_data_for_date_df, on='merge_key', how='left')
-
+        
         map_ready_gdf_for_date['predicted_cases'].fillna(0, inplace=True)
         map_ready_gdf_for_date['population'].fillna(0, inplace=True)
         map_ready_gdf_for_date['kabupaten_display'] = map_ready_gdf_for_date['kabupaten_standard'].fillna(map_ready_gdf_for_date['NAME_2'])
         map_ready_gdf_for_date['forecast_week_str'] = selected_date.strftime('%Y-%m-%d')
-
+        
         map_ready_gdf_for_date = map_ready_gdf_for_date[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
         map_ready_gdf_for_date.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
 
@@ -229,19 +251,19 @@ if map_data is not None and full_forecast_df is not None and not map_data.empty:
     st.sidebar.header("Forecast Trajectory")
     kabupaten_list = sorted(full_forecast_df['kabupaten_standard'].unique())
     selected_kabupaten = st.sidebar.selectbox("Select a Kabupaten/Kota:", kabupaten_list)
-
+    
     st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
     trajectory_df = full_forecast_df[full_forecast_df['kabupaten_standard'] == selected_kabupaten].copy()
-
+    
     if not trajectory_df.empty and 'population' in trajectory_df.columns and trajectory_df['population'].iloc[0] > 0:
         population_for_kab = trajectory_df['population'].iloc[0]
         trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000
     else:
         trajectory_df['incidence_rate'] = 0
-
+    
     chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
     st.sidebar.line_chart(chart_df, y='predicted_cases')
-
+    
     display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
     display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
     display_df.rename(columns={
@@ -278,5 +300,9 @@ if map_data is not None and full_forecast_df is not None and not map_data.empty:
 else:
     if map_data is not None and (map_data.empty or map_data['predicted_cases'].fillna(0).sum() == 0):
          st.error("Data files loaded, but no forecast data could be matched to map regions. Please check the name conversion logic or data formats.")
+         # Add a debug view for unmatched names
+         st.subheader("Debug: Unmatched Forecast Names")
+         unmatched_names = full_forecast_df[~full_forecast_df['converted_name_2'].isin(map_data['merge_key'])]['kabupaten_standard'].unique()
+         st.write(unmatched_names)
     else:
          st.error("Data files could not be loaded. Please check the logs for more information.")
