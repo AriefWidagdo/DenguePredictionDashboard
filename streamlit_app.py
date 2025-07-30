@@ -19,6 +19,7 @@ st.set_page_config(
 )
 
 # --- Helper Function for Name Standardization ---
+@st.cache_data
 def standardize_name(name):
     """
     Creates a reliable, simple key for merging by standardizing names from both
@@ -89,14 +90,16 @@ def load_data(owner, repo, forecast_path, geojson_path):
 def create_map(gdf):
     """
     Creates the Folium map with a choropleth layer and popups.
-    FIX: Converts Timestamp objects to strings to prevent JSON serialization errors.
+    This version prevents the JSON serialization error.
     """
     map_gdf = gdf.copy()
 
-    # --- FIX: Convert Date to string BEFORE passing to Folium ---
-    # This prevents the "Timestamp is not JSON serializable" error.
-    if 'Date' in map_gdf.columns:
+    # --- CRITICAL FIX: Convert Date column to string BEFORE passing to Folium ---
+    # This prevents the "TypeError: Object of type Timestamp is not JSON serializable" error.
+    if 'Date' in map_gdf.columns and pd.api.types.is_datetime64_any_dtype(map_gdf['Date']):
         map_gdf['forecast_week_str'] = map_gdf['Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
+        # Drop the original timestamp column as it's no longer needed and causes the error
+        map_gdf = map_gdf.drop(columns=['Date'])
     else:
         map_gdf['forecast_week_str'] = 'N/A'
 
@@ -121,9 +124,10 @@ def create_map(gdf):
         line_opacity=0.3,
         legend_name='Predicted Dengue Cases (Next Week)',
         name='Predicted Cases',
-        nan_fill_color='white' # Use white for areas with no data
+        nan_fill_color='white'
     ).add_to(m)
 
+    # Generate popup HTML using the string date and numeric values
     map_gdf['popup_html'] = map_gdf.apply(
         lambda row: f"""<div style="font-family: sans-serif;">
             <h4>📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
@@ -164,9 +168,9 @@ if merged_data is not None and forecast_data is not None:
             format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
         )
         
-        # Filter the already-merged data for the selected date. Also include unmatched regions.
+        # Filter the merged data for the selected date, keeping unmatched regions for a full map
         map_ready_gdf = merged_data[
-            (merged_data['Date'] == selected_date) | (merged_data['Date'].isnull())
+            (merged_data['Date'] == selected_date) | (pd.isnull(merged_data['Date']))
         ].copy()
         
     else:
@@ -203,7 +207,12 @@ if merged_data is not None and forecast_data is not None:
 
     # --- Top 10 Regions Section ---
     if selected_date:
-        top10_df = map_ready_gdf[map_ready_gdf['Date'] == selected_date].nlargest(10, 'predicted_cases')
+        # Create a clean dataframe for top 10 calculation
+        top10_df = map_ready_gdf[map_ready_gdf['predicted_cases'].notna()].copy()
+        top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'])
+        top10_df['population'] = pd.to_numeric(top10_df['population'])
+        
+        top10_df = top10_df.nlargest(10, 'predicted_cases')
         
         if not top10_df.empty:
             top10_df['incidence_rate'] = top10_df.apply(
