@@ -1,8 +1,7 @@
 # File: app.py
 # The "Face" of the EWARS-ID system - Final Production Version
 # Data Loading Update: Now fetches data from a private GitHub repository.
-# Updated to use january_2024_predictions.csv and show Population & Incidence Rate.
-# Uses internal logic to convert Kabupaten_Standard names to match GeoJSON NAME_2.
+# FINAL FIX: Implements a robust standardization logic to ensure CSV data loads correctly.
 
 import streamlit as st
 import pandas as pd
@@ -20,90 +19,42 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- NEW: Final, Robust Helper Function for Name Conversion ---
-def convert_kabupaten_standard_to_name2(kab_standard_name):
+# --- NEW: Robust Standardization Function ---
+def standardize_name(name):
     """
-    Converts a 'Kabupaten_Standard' name to the GADM 'NAME_2' format with high accuracy,
-    using a comprehensive dictionary for special cases and a fallback for general names.
-    """
-    if not isinstance(kab_standard_name, str):
-        return None
-
-    # Step 1: Standardize the input name to TitleCase with no spaces for consistent dictionary keys.
-    # Example: "kota bandung", "KotaBandung", "KOTA BANDUNG" all become "KotaBandung".
-    name_key = "".join(word.title() for word in kab_standard_name.strip().split())
-
-    # Step 2: Use a comprehensive dictionary for all known special cases, ambiguities, and cities.
-    # This is the most reliable way to ensure accurate mapping.
-    special_cases = {
-        # Cities that are just a name (no "Kota" prefix in source)
-        "Ambon": "Kota Ambon", "Balikpapan": "Kota Balikpapan", "BandaAceh": "Kota Banda Aceh",
-        "BandarLampung": "Kota Bandar Lampung", "Banjarmasin": "Kota Banjarmasin", "Batam": "Kota Batam",
-        "Bau-Bau": "Kota Bau-Bau", "Bekasi": "Kabupaten Bekasi", # Note: "Bekasi" is the Regency
-        "Bengkulu": "Kota Bengkulu", "Bima": "Kabupaten Bima", # Note: "Bima" is the Regency
-        "Binjai": "Kota Binjai", "Bitung": "Kota Bitung", "Blitar": "Kabupaten Blitar",
-        "Bogor": "Kabupaten Bogor", "Bontang": "Kota Bontang", "Bukittinggi": "Kota Bukittinggi",
-        "Cilegon": "Kota Cilegon", "Cimahi": "Kota Cimahi", "Cirebon": "Kabupaten Cirebon",
-        "Denpasar": "Kota Denpasar", "Depok": "Kota Depok", "Dumai": "Kota Dumai",
-        "Gorontalo": "Kabupaten Gorontalo", "Gunungsitoli": "Kota Gunungsitoli", "Jambi": "Kota Jambi",
-        "Jayapura": "Kabupaten Jayapura", "Kediri": "Kabupaten Kediri", "Kendari": "Kota Kendari",
-        "Kupang": "Kabupaten Kupang", "Langsa": "Kota Langsa", "Lhokseumawe": "Kota Lhokseumawe",
-        "Lubuklinggau": "Kota Lubuklinggau", "Madiun": "Kabupaten Madiun", "Magelang": "Kabupaten Magelang",
-        "Makassar": "Kota Makassar", "Malang": "Kabupaten Malang", "Manado": "Kota Manado",
-        "Mataram": "Kota Mataram", "Medan": "Kota Medan", "Metro": "Kota Metro",
-        "Mojokerto": "Kabupaten Mojokerto", "Padang": "Kota Padang", "Padangsidimpuan": "Kota Padangsidimpuan",
-        "PagarAlam": "Kota Pagar Alam", "PalangkaRaya": "Kota Palangka Raya", "Palembang": "Kota Palembang",
-        "Palopo": "Kota Palopo", "Palu": "Kota Palu", "Pangkalpinang": "Kota Pangkalpinang",
-        "Parepare": "Kota Parepare", "Pariaman": "Kota Pariaman", "Pasuruan": "Kabupaten Pasuruan",
-        "Payakumbuh": "Kota Payakumbuh", "Pekalongan": "Kabupaten Pekalongan", "Pekanbaru": "Kota Pekanbaru",
-        "Pematangsiantar": "Kota Pematangsiantar", "Pontianak": "Kabupaten Pontianak",
-        "Prabumulih": "Kota Prabumulih", "Probolinggo": "Kabupaten Probolinggo", "Sabang": "Kota Sabang",
-        "Salatiga": "Kota Salatiga", "Samarinda": "Kota Samarinda", "Sawahlunto": "Kota Sawahlunto",
-        "Semarang": "Kabupaten Semarang", "Serang": "Kabupaten Serang", "SiauTagulandangBiaro": "Kabupaten Siau Tagulandang Biaro",
-        "Sibolga": "Kota Sibolga", "Singkawang": "Kota Singkawang", "Solok": "Kabupaten Solok",
-        "Sorong": "Kabupaten Sorong", "Subulussalam": "Kota Subulussalam", "Sukabumi": "Kabupaten Sukabumi",
-        "SungaiPenuh": "Kota Sungai Penuh", "Surabaya": "Kota Surabaya", "Surakarta": "Kota Surakarta",
-        "Tangerang": "Kabupaten Tangerang", "TangerangSelatan": "Kota Tangerang Selatan",
-        "Tanjungbalai": "Kota Tanjungbalai", "Tanjungpinang": "Kota Tanjungpinang", "Tapin": "Kabupaten Tapin",
-        "Tarakan": "Kota Tarakan", "Tasikmalaya": "Kabupaten Tasikmalaya", "Tebingtinggi": "Kota Tebing Tinggi",
-        "Tegal": "Kabupaten Tegal", "Ternate": "Kota Ternate", "TidoreKepulauan": "Kota Tidore Kepulauan",
-        "Tomohon": "Kota Tomohon", "Tual": "Kota Tual", "Yogyakarta": "Kota Yogyakarta",
-
-        # Jakarta Special Administrative Cities
-        "JakartaBarat": "Kota Administrasi Jakarta Barat", "JakartaPusat": "Kota Administrasi Jakarta Pusat",
-        "JakartaSelatan": "Kota Administrasi Jakarta Selatan", "JakartaTimur": "Kota Administrasi Jakarta Timur",
-        "JakartaUtara": "Kota Administrasi Jakarta Utara", "KepulauanSeribu": "Kabupaten Administrasi Kepulauan Seribu",
-        
-        # Explicit "Kota" prefixed names from your list
-        "KotaBandung": "Kota Bandung", "KotaBekasi": "Kota Bekasi", "KotaBima": "Kota Bima",
-        "KotaBinjai": "Kota Binjai", "KotaBlitar": "Kota Blitar", "KotaBogor": "Kota Bogor",
-        "KotaCirebon": "Kota Cirebon", "KotaGorontalo": "Kota Gorontalo", "KotaJayapura": "Kota Jayapura",
-        "KotaKediri": "Kota Kediri", "KotaKupang": "Kota Kupang", "KotaMadiun": "Kota Madiun",
-        "KotaMagelang": "Kota Magelang", "KotaMalang": "Kota Malang", "KotaMojokerto": "Kota Mojokerto",
-        "KotaPasuruan": "Kota Pasuruan", "KotaPekalongan": "Kota Pekalongan", "KotaPontianak": "Kota Pontianak",
-        "KotaProbolinggo": "Kota Probolinggo", "KotaSemarang": "Kota Semarang", "KotaSerang": "Kota Serang",
-        "KotaSolok": "Kota Solok", "KotaSorong": "Kota Sorong", "KotaSukabumi": "Kota Sukabumi",
-        "KotaTangerang": "Kota Tangerang", "KotaTanjungbalai": "Kota Tanjungbalai",
-        "KotaTasikmalaya": "Kota Tasikmalaya", "KotaTegal": "Kota Tegal", "KotaYogyakarta": "Kota Yogyakarta",
-        "Kotamobagu": "Kota Kotamobagu",
-    }
+    Creates a reliable, simple key for merging by standardizing names from both
+    the forecast CSV and the GeoJSON file.
+    - Converts to lowercase
+    - Removes all prefixes (kabupaten, kota, etc.)
+    - Removes all spaces and non-alphanumeric characters.
     
-    if name_key in special_cases:
-        return special_cases[name_key]
-
-    # Step 3: If not a special case, apply the general rule. Assume it's a Kabupaten.
-    # This now correctly handles names like "AcehBarat" -> "Kabupaten Aceh Barat".
-    spaced_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', name_key).strip()
-    return f"Kabupaten {spaced_name}"
-
+    Examples:
+    'Kota Bandung' -> 'bandung'
+    'KOTA BEKASI'  -> 'bekasi'
+    'Kabupaten Aceh Barat' -> 'acehbarat'
+    'AcehBarat' -> 'acehbarat'
+    """
+    if not isinstance(name, str):
+        return None
+    
+    name_lower = name.lower().strip()
+    
+    # List of prefixes to remove. Ordered to handle variations.
+    prefixes = ['kabupaten administrasi', 'kota administrasi', 'kabupaten', 'kota', 'kab.']
+    for prefix in prefixes:
+        if name_lower.startswith(prefix):
+            # Replace only the first occurrence of the prefix
+            name_lower = name_lower.replace(prefix, '', 1).strip()
+            
+    # Remove all remaining spaces and non-alphanumeric characters for a clean key
+    return re.sub(r'[^a-z0-9]', '', name_lower)
 
 # --- Caching Functions ---
 @st.cache_data
 def load_data(owner, repo, forecast_path, geojson_path):
     """
-    Loads and prepares all data from a private GitHub repo,
-    returning a map-ready GDF and a full forecast DF.
-    Converts kabupaten names internally for matching.
+    Loads and prepares all data from a private GitHub repo using a robust
+    standardization method to ensure data is merged correctly.
     """
     try:
         # --- Securely fetch files from GitHub ---
@@ -135,42 +86,41 @@ def load_data(owner, repo, forecast_path, geojson_path):
         
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
         
-        # --- Processing logic with the NEW robust Name Conversion ---
-        forecast_df['converted_name_2'] = forecast_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
+        # --- FIX: Create the reliable merge key on BOTH dataframes ---
+        forecast_df['merge_key'] = forecast_df['kabupaten_standard'].apply(standardize_name)
+        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'].apply(standardize_name)
+        
+        # --- Merge the full forecast dataset with the GeoDataFrame ---
+        # This keeps all map shapes and attaches forecast data where the keys match.
+        merged_gdf = kabupaten_gdf.merge(forecast_df, on='merge_key', how='left')
 
-        forecast_df = forecast_df.sort_values(by=['kabupaten_standard', 'Date'])
-        first_week_df = forecast_df.loc[forecast_df.groupby('kabupaten_standard')['Date'].idxmin()].copy()
-        first_week_df['forecast_week_str'] = first_week_df['Date'].dt.strftime('%Y-%m-%d')
+        # --- Add Debugging to show match success ---
+        st.sidebar.header("Data Loading Status")
+        matched_count = merged_gdf['kabupaten_standard'].nunique()
+        total_count = forecast_df['kabupaten_standard'].nunique()
+        st.sidebar.success(f"Successfully matched {matched_count} of {total_count} forecast regions to the map.")
 
-        # Prepare for merging
-        first_week_df['merge_key'] = first_week_df['converted_name_2']
-        kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2']
+        unmatched_keys = set(forecast_df['merge_key']) - set(kabupaten_gdf['merge_key'])
+        unmatched_names = forecast_df[forecast_df['merge_key'].isin(unmatched_keys)]['kabupaten_standard'].unique()
+        if len(unmatched_names) > 0:
+            with st.sidebar.expander("View Unmatched Regions"):
+                st.write(unmatched_names)
         
-        merged_gdf = kabupaten_gdf.merge(first_week_df, on='merge_key', how='left')
+        # Return the fully merged data and the original forecast dataframe
+        return merged_gdf, forecast_df
         
-        merged_gdf['predicted_cases'].fillna(0, inplace=True)
-        merged_gdf['population'].fillna(0, inplace=True)
-        merged_gdf['kabupaten_display'] = merged_gdf['kabupaten_standard'].fillna(merged_gdf['NAME_2'])
-        
-        map_ready_gdf = merged_gdf[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
-        map_ready_gdf.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
-        
-        return map_ready_gdf, forecast_df
-        
-    except requests.exceptions.RequestException as e:
-        st.error(f"FATAL ERROR: Could not fetch data from GitHub. Check token and repo details. Error: {e}")
-        return None, None
-    except KeyError as e:
-        st.error(f"FATAL ERROR: Missing key in secrets or data. Error: {e}. Check GITHUB_TOKEN or CSV column names.")
-        return None, None
     except Exception as e:
-        st.error(f"FATAL ERROR: An error occurred during data processing: {e}")
+        st.error(f"FATAL ERROR: An error occurred during data loading or processing: {e}")
         return None, None
 
-# Map function using Folium's Choropleth
 def create_map(gdf):
+    """Creates the Folium map with choropleth layer and popups."""
+    # Ensure data is numeric for calculation
+    gdf['predicted_cases_numeric'] = pd.to_numeric(gdf['predicted_cases'], errors='coerce').fillna(0)
+    gdf['population_numeric'] = pd.to_numeric(gdf['population'], errors='coerce').fillna(0)
+    
     gdf['incidence_rate'] = gdf.apply(
-        lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
+        lambda row: (row['predicted_cases_numeric'] / row['population_numeric']) * 100000 if row['population_numeric'] > 0 else 0,
         axis=1
     )
 
@@ -179,28 +129,29 @@ def create_map(gdf):
     folium.Choropleth(
         geo_data=gdf,
         data=gdf,
-        columns=['merge_key', 'predicted_cases'],
+        columns=['merge_key', 'predicted_cases_numeric'],
         key_on='feature.properties.merge_key',
         fill_color='YlOrRd',
         fill_opacity=0.8,
         line_opacity=0.3,
         legend_name='Predicted Dengue Cases (Next Week)',
-        name='Predicted Cases'
+        name='Predicted Cases',
+        nan_fill_color='white' # Color for regions with no data
     ).add_to(m)
 
     gdf['popup_html'] = gdf.apply(
         lambda row: f"""<div style="font-family: sans-serif;">
-            <h4>📍 {row['kabupaten']}</h4>
-            <p><b>Forecast Week:</b> {row.get('forecast_week_str', 'N/A')}</p>
-            <p><b>Predicted Cases:</b> {int(row['predicted_cases'])}</p>
-            <p><b>Population:</b> {int(row['population'])}</p>
+            <h4>📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
+            <p><b>Forecast Week:</b> {row.get('Date', pd.NaT).strftime('%Y-%m-%d') if pd.notna(row.get('Date')) else 'N/A'}</p>
+            <p><b>Predicted Cases:</b> {int(row['predicted_cases_numeric'])}</p>
+            <p><b>Population:</b> {int(row['population_numeric'])}</p>
             <p><b>Incidence Rate (/100k):</b> {row['incidence_rate']:.2f}</p>
         </div>""", axis=1)
 
     folium.GeoJson(
         gdf,
         style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0},
-        tooltip=folium.features.GeoJsonTooltip(fields=['kabupaten'], aliases=['Region:']),
+        tooltip=folium.features.GeoJsonTooltip(fields=['NAME_2'], aliases=['Region:']),
         popup=folium.features.GeoJsonPopup(fields=['popup_html'], aliases=[''])
     ).add_to(m)
     
@@ -215,11 +166,13 @@ PRIVATE_REPO_NAME = "data-raw"
 FORECAST_FILE_PATH = "january_2024_predictions.csv"
 GEOJSON_PATH = "gadm41_IDN_2.json"
 
-map_data, full_forecast_df = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
+# Load data once
+merged_data, forecast_data = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
 
-if map_data is not None and full_forecast_df is not None and not map_data.empty:
+if merged_data is not None and forecast_data is not None:
     
-    unique_dates = sorted(full_forecast_df['Date'].unique())
+    unique_dates = sorted(forecast_data['Date'].unique())
+    
     if unique_dates:
         selected_date = st.selectbox(
             "Select Forecast Date for Map View:",
@@ -227,82 +180,72 @@ if map_data is not None and full_forecast_df is not None and not map_data.empty:
             format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
         )
         
-        map_data_for_date_df = full_forecast_df[full_forecast_df['Date'] == selected_date].copy()
+        # Filter the already-merged data for the selected date
+        map_ready_gdf = merged_data[
+            (merged_data['Date'] == selected_date) | (merged_data['Date'].isnull())
+        ].copy()
         
-        map_data_for_date_df['merge_key'] = map_data_for_date_df['kabupaten_standard'].apply(convert_kabupaten_standard_to_name2)
-        
-        kabupaten_gdf_base = map_data[['geometry', 'NAME_2', 'merge_key']].drop_duplicates(subset=['merge_key'])
-
-        map_ready_gdf_for_date = kabupaten_gdf_base.merge(map_data_for_date_df, on='merge_key', how='left')
-        
-        map_ready_gdf_for_date['predicted_cases'].fillna(0, inplace=True)
-        map_ready_gdf_for_date['population'].fillna(0, inplace=True)
-        map_ready_gdf_for_date['kabupaten_display'] = map_ready_gdf_for_date['kabupaten_standard'].fillna(map_ready_gdf_for_date['NAME_2'])
-        map_ready_gdf_for_date['forecast_week_str'] = selected_date.strftime('%Y-%m-%d')
-        
-        map_ready_gdf_for_date = map_ready_gdf_for_date[['geometry', 'merge_key', 'kabupaten_display', 'predicted_cases', 'population', 'NAME_2', 'forecast_week_str']].copy()
-        map_ready_gdf_for_date.rename(columns={'kabupaten_display': 'kabupaten'}, inplace=True)
+        # For shapes that had no match, ensure essential columns exist and are filled
+        map_ready_gdf['population'].fillna(0, inplace=True)
+        map_ready_gdf['predicted_cases'].fillna(0, inplace=True)
 
     else:
         st.warning("No forecast dates found in the data.")
         selected_date = None
-        map_ready_gdf_for_date = map_data
+        # Use the base merged data for the map, showing all shapes but no case data
+        map_ready_gdf = merged_data.copy()
+        map_ready_gdf['population'].fillna(0, inplace=True)
+        map_ready_gdf['predicted_cases'].fillna(0, inplace=True)
 
+
+    # --- Sidebar Controls ---
     st.sidebar.header("Forecast Trajectory")
-    kabupaten_list = sorted(full_forecast_df['kabupaten_standard'].unique())
+    kabupaten_list = sorted(forecast_data['kabupaten_standard'].unique())
     selected_kabupaten = st.sidebar.selectbox("Select a Kabupaten/Kota:", kabupaten_list)
     
     st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
-    trajectory_df = full_forecast_df[full_forecast_df['kabupaten_standard'] == selected_kabupaten].copy()
+    trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
     
-    if not trajectory_df.empty and 'population' in trajectory_df.columns and trajectory_df['population'].iloc[0] > 0:
+    if not trajectory_df.empty:
         population_for_kab = trajectory_df['population'].iloc[0]
-        trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000
-    else:
-        trajectory_df['incidence_rate'] = 0
-    
-    chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
-    st.sidebar.line_chart(chart_df, y='predicted_cases')
-    
-    display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
-    display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-    display_df.rename(columns={
-        'Date': 'Week',
-        'predicted_cases': 'Forecast Cases',
-        'incidence_rate': 'Incidence Rate (/100k)'
-    }, inplace=True)
-    st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
-
-    st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'Next Week'})")
-    if selected_date:
-        map_object = create_map(map_ready_gdf_for_date)
-    else:
-        map_object = create_map(map_data)
-    st_folium(map_object, returned_objects=[], width='100%', height=550, key="overview_map")
-
-    if selected_date and not map_ready_gdf_for_date.empty:
-        top10_df = map_ready_gdf_for_date.nlargest(10, 'predicted_cases')[['kabupaten', 'predicted_cases', 'population']]
-        top10_df['incidence_rate'] = top10_df.apply(
-            lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
-            axis=1
-        )
-        top10_df_display = top10_df[['kabupaten', 'predicted_cases', 'incidence_rate']].copy()
-        top10_df_display.rename(columns={
-            'kabupaten': 'Region',
-            'predicted_cases': 'Predicted Cases',
-            'incidence_rate': 'Incidence Rate (/100k)'
+        if population_for_kab > 0:
+            trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000
+        else:
+            trajectory_df['incidence_rate'] = 0
+        
+        chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
+        st.sidebar.line_chart(chart_df, y='predicted_cases')
+        
+        display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
+        display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+        display_df.rename(columns={
+            'Date': 'Week', 'predicted_cases': 'Forecast Cases', 'incidence_rate': 'Incidence Rate (/100k)'
         }, inplace=True)
-        st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
-        st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
-    else:
-        st.info("Select a date to view the Top 10 regions.")
+        st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
+
+
+    # --- Main Map Section ---
+    st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'})")
+    
+    # FIX: Use a dynamic key for the map to force re-render on date change
+    map_object = create_map(map_ready_gdf)
+    st_folium(map_object, width='100%', height=550, key=f"map_{selected_date}")
+
+    # --- Top 10 Regions Section ---
+    if selected_date:
+        top10_df = map_ready_gdf[map_ready_gdf['Date'] == selected_date].nlargest(10, 'predicted_cases')
+        
+        if not top10_df.empty:
+            top10_df['incidence_rate'] = top10_df.apply(
+                lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
+                axis=1
+            )
+            top10_df_display = top10_df[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
+            top10_df_display.rename(columns={
+                'NAME_2': 'Region', 'predicted_cases': 'Predicted Cases', 'incidence_rate': 'Incidence Rate (/100k)'
+            }, inplace=True)
+            st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
+            st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
 
 else:
-    if map_data is not None and (map_data.empty or map_data['predicted_cases'].fillna(0).sum() == 0):
-         st.error("Data files loaded, but no forecast data could be matched to map regions. Please check the name conversion logic or data formats.")
-         # Add a debug view for unmatched names
-         st.subheader("Debug: Unmatched Forecast Names")
-         unmatched_names = full_forecast_df[~full_forecast_df['converted_name_2'].isin(map_data['merge_key'])]['kabupaten_standard'].unique()
-         st.write(unmatched_names)
-    else:
-         st.error("Data files could not be loaded. Please check the logs for more information.")
+    st.error("Data files could not be loaded or processed. Please check the logs in the sidebar.")
