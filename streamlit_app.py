@@ -233,40 +233,41 @@ if merged_data is not None and forecast_data is not None:
         returned_objects=[] # Crucial for preventing re-runs on interaction
     )
 
-    # --- NEW SECTION: Display Totals Below the Map ---
+    # --- MODIFIED SECTION: Display Totals Below the Map ---
     if selected_date:
-        # Filter data for the selected date to calculate totals
-        totals_df = map_ready_gdf[map_ready_gdf['Date'] == selected_date].copy()
+        # MODIFICATION: Filter based on the presence of data, not the date column.
+        # This is more robust and aligns with the logic in the Top 10 section.
+        totals_df = map_ready_gdf[map_ready_gdf['predicted_cases'].notna()].copy()
 
         if not totals_df.empty:
-            # Ensure columns are numeric
+            # Ensure columns are numeric for calculation
             totals_df['predicted_cases'] = pd.to_numeric(totals_df['predicted_cases'], errors='coerce')
             totals_df['population'] = pd.to_numeric(totals_df['population'], errors='coerce')
 
             # Calculate Totals
             total_population = totals_df['population'].sum()
             total_predicted_cases = totals_df['predicted_cases'].sum()
+            
             # Calculate weighted average incidence rate
-            # Weighted by population to avoid simple average of rates
-            valid_incidence_rows = totals_df.dropna(subset=['population', 'predicted_cases'])
-            valid_incidence_rows = valid_incidence_rows[valid_incidence_rows['population'] > 0]
-            if not valid_incidence_rows.empty:
-                 total_weighted_cases = valid_incidence_rows['predicted_cases'].sum()
-                 total_weighted_population = valid_incidence_rows['population'].sum()
-                 average_incidence_rate = (total_weighted_cases / total_weighted_population) * 100000
+            # This logic correctly handles potential division by zero
+            if total_population > 0:
+                 average_incidence_rate = (total_predicted_cases / total_population) * 100000
             else:
                  average_incidence_rate = 0
 
             # Display Metrics
+            st.subheader(f"National Totals for {selected_date.strftime('%Y-%m-%d')}")
             col1, col2, col3 = st.columns(3)
-            col1.metric("Total Population (Forecast Regions)", f"{total_population:,.0f}")
+            col1.metric("Total Population (in Forecast)", f"{total_population:,.0f}")
             col2.metric("Total Predicted Cases (Next Week)", f"{total_predicted_cases:,.0f}")
-            col3.metric("Weighted Avg Incidence Rate (/100k)", f"{average_incidence_rate:.2f}")
+            col3.metric("Weighted Avg. Incidence Rate (/100k)", f"{average_incidence_rate:.2f}")
 
         else:
             st.info("No data available for totals calculation on the selected date.")
     else:
         st.info("Please select a forecast date to see totals.")
+    # --- End of Modified Section ---
+
 
     # --- Top 10 Regions Section ---
     if selected_date:
