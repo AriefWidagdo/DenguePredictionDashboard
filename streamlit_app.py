@@ -1,6 +1,6 @@
 # File: streamlit_app.py
 # The "Face" of the EWARS-ID system - Enhanced Production Version
-# Enhanced with better summary metrics, weather integration, and improved features
+# Enhanced with better summary metrics, Open-Meteo weather integration, and improved features
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -45,16 +45,11 @@ def standardize_name(name):
             name_lower = name_lower.replace(prefix, '', 1).strip()
     return re.sub(r'[^a-z0-9]', '', name_lower)
 
-# --- Weather Data Function ---
+# --- NEW: Open-Meteo Weather Data Function ---
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_weather_data():
-    """Fetch weather data for major Indonesian cities."""
+def get_open_meteo_weather_data():
+    """Fetch current weather data for major Indonesian cities using Open-Meteo."""
     try:
-        # Get API key from secrets, with fallback
-        api_key = st.secrets.get("WEATHER_API_KEY", "")
-        if not api_key:
-            return None
-            
         cities = [
             {"name": "Jakarta", "lat": -6.2088, "lon": 106.8456},
             {"name": "Surabaya", "lat": -7.2575, "lon": 112.7521},
@@ -64,21 +59,38 @@ def get_weather_data():
         ]
         
         weather_data = []
+        # Base URL for the Open-Meteo API
+        base_url = "https://api.open-meteo.com/v1/forecast"
+        
         for city in cities:
-            url = f"http://api.openweathermap.org/data/2.5/weather?lat={city['lat']}&lon={city['lon']}&appid={api_key}&units=metric"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
+            # Parameters for the API request
+            params = {
+                "latitude": city["lat"],
+                "longitude": city["lon"],
+                "current_weather": "true",
+                "hourly": "temperature_2m,relativehumidity_2m"
+            }
+            response = requests.get(base_url, params=params)
+            response.raise_for_status()  # Raise an exception for bad status codes
+            data = response.json()
+
+            if data.get("current_weather"):
+                current = data['current_weather']
                 weather_data.append({
                     'city': city['name'],
-                    'temperature': data['main']['temp'],
-                    'humidity': data['main']['humidity'],
-                    'description': data['weather'][0]['description'].title(),
-                    'feels_like': data['main']['feels_like']
+                    'temperature': current.get('temperature'),
+                    'windspeed': current.get('windspeed'),
+                    'weathercode': current.get('weathercode') 
                 })
+
         return pd.DataFrame(weather_data) if weather_data else None
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
+        st.sidebar.error(f"Weather API request failed: {e}")
         return None
+    except Exception as e:
+        st.sidebar.error(f"An error occurred while fetching weather data: {e}")
+        return None
+
 
 # --- Caching Functions ---
 @st.cache_data
@@ -405,30 +417,32 @@ if merged_data is not None and forecast_data is not None:
     with st.sidebar:
         st.header("🎛️ Dashboard Controls")
         
-        # Weather data section
-        st.subheader("🌤️ Weather Information")
+        # MODIFIED: Weather data section using Open-Meteo
+        st.subheader("🌤️ Weather Information (via Open-Meteo)")
         if st.button("Refresh Weather Data", help="Update current weather conditions"):
-            with st.spinner("Fetching weather data..."):
-                st.session_state.weather_data = get_weather_data()
-        
+            # Clear the cache and rerun to fetch new data
+            st.cache_data.clear()
+            st.session_state.weather_data = get_open_meteo_weather_data()
+            st.experimental_rerun()
+
         # Display weather if available
-        weather_data = st.session_state.weather_data or get_weather_data()
+        if 'weather_data' not in st.session_state:
+            st.session_state.weather_data = get_open_meteo_weather_data()
+
+        weather_data = st.session_state.weather_data
+        
         if weather_data is not None and not weather_data.empty:
-            st.success("Weather data loaded successfully!")
+            st.success("Weather data loaded!")
             for _, row in weather_data.iterrows():
                 with st.container():
                     st.metric(
                         label=f"🏙️ {row['city']}",
-                        value=f"{row['temperature']:.1f}°C",
-                        delta=f"Feels like {row['feels_like']:.1f}°C"
+                        value=f"{row['temperature']:.1f}°C"
                     )
-                    st.caption(f"💧 {row['humidity']}% humidity • {row['description']}")
+                    st.caption(f"💨 Wind: {row['windspeed']} km/h")
         else:
-            if 'WEATHER_API_KEY' not in st.secrets:
-                st.info("Add `WEATHER_API_KEY` to secrets to enable weather data")
-            else:
-                st.warning("Weather data currently unavailable")
-        
+            st.warning("Weather data currently unavailable.")
+
         st.markdown("---")
         
         # Region analysis
