@@ -1,164 +1,154 @@
-# File: evaluate_and_train_model.py
-# The definitive modeling script. It first evaluates the model's performance
-# against a naive baseline using a time-series split, then retrains on all
-# data to generate the final, trusted forecast.
-
+# modelling_v2.py
+# Use Randomg Forest and XGBoost for modelling
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-import time
-import os
 import joblib
-from sklearn.metrics import mean_squared_error
+import os
+import traceback
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 
-# --- CONFIGURATION ---
-INPUT_FILE = 'model_ready_data.csv'
-OUTPUT_PREDICTIONS_FILE = 'predictions.csv'
-MODEL_STORAGE_PATH = 'trained_models'
-VALIDATION_CUTOFF_DATE = '2023-10-01'
-SCALING_FACTOR = 13.5
-
-# --- THE STABLE FEATURE LIST ---
-# We explicitly define the order of features. This is now the single
-# source of truth for our model's structure.
-FEATURES = [
-    'mean_mdpl',
-    'week_of_year',
-    'month',
-    'total_cases_lag_1',
-    'total_cases_lag_2',
-    'total_cases_lag_3',
-    'total_cases_lag_4',
-    'precipitation_sum_lag_1',
-    'precipitation_sum_lag_2',
-    'precipitation_sum_lag_3',
-    'precipitation_sum_lag_4',
-    'temperature_2m_mean_lag_1',
-    'temperature_2m_mean_lag_2',
-    'temperature_2m_mean_lag_3',
-    'temperature_2m_mean_lag_4',
-    'total_cases_rolling_mean_4wk',
-    'temp_rolling_mean_4wk'
-]
-
-# --- MAIN SCRIPT ---
-
-def calculate_baseline_performance(df, cutoff_date):
-    """Calculates the RMSE of a simple 'persistence' model."""
-    print("\n--- Phase 1: Calculating Naive Baseline Performance ---")
-    
-    test_df = df[df['week'] >= cutoff_date].copy()
-    naive_predictions = test_df['total_cases_lag_1']
-    actual_values = test_df['total_cases']
-    
-    baseline_rmse = np.sqrt(mean_squared_error(actual_values, naive_predictions))
-    print(f"  -> Naive Baseline RMSE: {baseline_rmse:.4f}")
-    return baseline_rmse
-
-def train_and_evaluate_xgboost(df, cutoff_date):
-    """Trains and evaluates the real XGBoost model."""
-    print("\n--- Phase 2: Training and Evaluating Prediction Model DBD ---")
-
-    df_copy = df.copy()
-    df_copy['log_total_cases'] = np.log1p(df_copy['total_cases'])
-    
-    train_df = df_copy[df_copy['week'] < cutoff_date]
-    test_df = df_copy[df_copy['week'] >= cutoff_date]
-    
-    TARGET = 'log_total_cases'
-    
-    all_validation_results = []
-    common_kabupatens = sorted(list(set(train_df['kabupaten'].unique()) & set(test_df['kabupaten'].unique())))
-
-    for i, kabupaten_name in enumerate(common_kabupatens):
-        progress = f"({i+1}/{len(common_kabupatens)})"
-        print(f"\r     {progress} Validating model for: {kabupaten_name.ljust(30)}", end="")
+def run_modeling_pipeline(data_file="dengue_features_engineered.csv", output_dir="Model_v2_Corrected"):
+    """
+    Final, corrected modeling pipeline that:
+    1. Removes the target-leaking feature ('Incidence_Rate').
+    2. Compares RF and XGBoost with Time Series CV.
+    3. Evaluates with R², MAE, and RMSE.
+    4. Saves the best model and a comprehensive report.
+    """
+    try:
+        # --- 1. Setup Environment ---
+        print(f"--- Starting Final Corrected Modeling Pipeline ---")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         
-        kab_train_df = train_df[train_df['kabupaten'] == kabupaten_name]
-        kab_test_df = test_df[test_df['kabupaten'] == kabupaten_name]
-        if len(kab_train_df) < 20 or len(kab_test_df) == 0: continue
+        report_path = os.path.join(output_dir, "Model_Comparison_Report_Corrected.txt")
+        with open(report_path, "w") as report:
+            report.write("--- Model Comparison and Evaluation Report (Corrected for Target Leak) ---\n\n")
 
-        X_train, y_train_log = kab_train_df[FEATURES], kab_train_df[TARGET]
-        X_test, y_test_actual = kab_test_df[FEATURES], kab_test_df['total_cases']
+            # --- 2. Load and Prepare Data ---
+            print(f"Step 1: Loading data from '{data_file}'...")
+            df = pd.read_csv(data_file)
+            df['Date'] = pd.to_datetime(df['Date'])
+            report.write(f"Loaded {len(df)} records from {data_file}\n")
+            
+            y = df['Cases']
+            
+            features_to_drop = ['Cases', 'Date', 'Province', 'Kabupaten_Standard', 'BPS_Code', 'Incidence_Rate']
+            X = df.drop(columns=features_to_drop)
+            
+            print(f"Features used for training: {len(X.columns)} features")
 
-        model = xgb.XGBRegressor(objective='count:poisson', n_estimators=1000, learning_rate=0.05,
-                                 max_depth=5, subsample=0.8, colsample_bytree=0.8, random_state=42,
-                                 early_stopping_rounds=50, n_jobs=-1)
-        
-        model.fit(X_train, y_train_log, eval_set=[(X_test, np.log1p(y_test_actual))], verbose=False)
-        
-        log_preds = model.predict(X_test)
-        actual_preds = np.expm1(log_preds)
-        
-        all_validation_results.extend(list(zip(y_test_actual, actual_preds)))
+            # --- 3. Time-Based Split ---
+            print("Step 2: Performing time-based train-test split...")
+            unique_dates = np.sort(df['Date'].unique())
+            split_point = int(len(unique_dates) * 0.7)
+            split_date = unique_dates[split_point]
+            
+            train_indices = df[df['Date'] < split_date].index
+            test_indices = df[df['Date'] >= split_date].index
+            
+            X_train, X_test = X.loc[train_indices], X.loc[test_indices]
+            y_train, y_test = y.loc[train_indices], y.loc[test_indices]
+            
+            report.write(f"Data split on date: {pd.to_datetime(split_date).date()}\n")
+            report.write(f"Training set size: {len(X_train)} records\n")
+            report.write(f"Test set size: {len(X_test)} records\n\n")
 
-    actuals = [res[0] for res in all_validation_results]
-    predictions = [res[1] for res in all_validation_results]
-    xgb_rmse = np.sqrt(mean_squared_error(actuals, predictions))
-    print(f"\n  -> XGBoost Model RMSE on Validation Set: {xgb_rmse:.4f}")
-    return xgb_rmse
+            # --- 4. Time Series Cross-Validation Setup ---
+            tscv = TimeSeriesSplit(n_splits=5)
 
-def retrain_and_forecast(df):
-    """Retrains the model on all data and generates the final forecast."""
-    print("\n--- Phase 3: Retraining on All Data for Final Forecast ---")
-    final_predictions = []
-    
-    df['log_total_cases'] = np.log1p(df['total_cases'])
-    TARGET = 'log_total_cases'
+            # --- 5. Model Training and Tuning ---
+            print("Step 3: Training and tuning models...")
+            models = {
+                "RandomForest": RandomForestRegressor(random_state=42),
+                "XGBoost": XGBRegressor(random_state=42)
+            }
+            
+            param_grid = {
+                "RandomForest": {'n_estimators': [100, 200], 'max_depth': [15, 20], 'min_samples_leaf': [5]},
+                "XGBoost": {'n_estimators': [100, 200], 'max_depth': [5, 7], 'learning_rate': [0.1]}
+            }
 
-    # Create model storage directory
-    os.makedirs(MODEL_STORAGE_PATH, exist_ok=True)
+            best_estimators = {}
+            for name, model in models.items():
+                print(f"--- Tuning {name}... ---")
+                report.write(f"--- Results for {name} ---\n")
+                
+                grid_search = GridSearchCV(estimator=model, param_grid=param_grid[name], cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1, verbose=1)
+                grid_search.fit(X_train, y_train)
+                
+                best_estimators[name] = grid_search.best_estimator_
+                
+                report.write(f"Best Parameters found: {grid_search.best_params_}\n")
+                report.write(f"Best Cross-Validation MAE: {-grid_search.best_score_:.3f}\n\n")
 
-    for i, kabupaten_name in enumerate(df['kabupaten'].unique()):
-        progress = f"({i+1}/{len(df['kabupaten'].unique())})"
-        print(f"\r     {progress} Generating final forecast for: {kabupaten_name.ljust(30)}", end="")
-        
-        kabupaten_df = df[df['kabupaten'] == kabupaten_name]
-        if len(kabupaten_df) < 20: continue
+            # --- 6. Final Evaluation on Hold-Out Test Set ---
+            print("\nStep 4: Evaluating best models on the unseen test set...")
+            report.write("--- Final Evaluation on Test Set ---\n")
+            
+            results = {}
+            for name, model in best_estimators.items():
+                print(f"Evaluating best {name}...")
+                predictions = model.predict(X_test)
+                
+                # --- RMSE CALCULATION ADDED HERE ---
+                mae = mean_absolute_error(y_test, predictions)
+                mse = mean_squared_error(y_test, predictions)
+                rmse = np.sqrt(mse) # Take the square root of MSE
+                r2 = r2_score(y_test, predictions)
+                
+                results[name] = {'MAE': mae, 'RMSE': rmse, 'R2': r2}
+                
+                report.write(f"\nModel: {name}\n")
+                report.write(f"  R-squared (R²): {r2:.3f}\n")
+                report.write(f"  Mean Absolute Error (MAE): {mae:.3f}\n")
+                report.write(f"  Root Mean Squared Error (RMSE): {rmse:.3f}\n")
 
-        X_train, y_train_log = kabupaten_df[FEATURES], kabupaten_df[TARGET]
-        X_to_predict = kabupaten_df[FEATURES].tail(1)
+            # --- 7. Determine the Best Model and Save ---
+            best_model_name = min(results, key=lambda k: results[k]['MAE']) # Still choosing best based on MAE
+            best_model = best_estimators[best_model_name]
+            
+            conclusion = (f"\n--- Conclusion ---\n"
+                          f"The best performing model is '{best_model_name}' with a "
+                          f"Mean Absolute Error of {results[best_model_name]['MAE']:.3f} on the final test set.\n"
+                          f"This model is now validated and saved.\n")
+            print(conclusion)
+            report.write(conclusion)
+            
+            if hasattr(best_model, 'feature_importances_'):
+                report.write(f"\nTop 10 Features for Best Model ({best_model_name}):\n")
+                feature_importance = pd.Series(best_model.feature_importances_, index=X.columns).sort_values(ascending=False)
+                report.write(feature_importance.head(10).to_string() + "\n")
+            
+            model_filename = os.path.join(output_dir, "best_dengue_model_corrected.joblib")
+            columns_filename = os.path.join(output_dir, "model_columns_corrected.joblib")
+            
+            print(f"Saving the best model ({best_model_name}) to '{model_filename}'...")
+            joblib.dump(best_model, model_filename)
+            joblib.dump(X.columns.tolist(), columns_filename)
 
-        model = xgb.XGBRegressor(objective='count:poisson', n_estimators=1000, learning_rate=0.05,
-                                 max_depth=5, subsample=0.8, colsample_bytree=0.8, random_state=42,
-                                 early_stopping_rounds=50, n_jobs=-1)
-        
-        model.fit(X_train, y_train_log, eval_set=[(X_train.tail(10), y_train_log.tail(10))], verbose=False)
-        
-        log_prediction = model.predict(X_to_predict)
-        raw_prediction = np.expm1(log_prediction[0])
-        scaled_prediction = raw_prediction * SCALING_FACTOR
-        final_predicted_cases = max(0, round(float(scaled_prediction)))
-        
-        # Save the trained model
-        model_filename = f"{MODEL_STORAGE_PATH}/{kabupaten_name.replace(' ', '_').upper()}.joblib"
-        joblib.dump(model, model_filename)
+        print(f"\n--- PIPELINE COMPLETE ---")
+        print(f"All outputs are in the '{output_dir}/' directory.")
 
-        last_known_week = kabupaten_df['week'].max()
-        prediction_week = last_known_week + pd.Timedelta(weeks=1)
-        final_predictions.append({'kabupaten': kabupaten_name, 'prediction_week': prediction_week.strftime('%Y-%m-%d'),
-                                  'predicted_cases': final_predicted_cases})
 
-    predictions_df = pd.DataFrame(final_predictions)
-    predictions_df.to_csv(OUTPUT_PREDICTIONS_FILE, index=False)
-    print(f"\n✅ Success! Created '{OUTPUT_PREDICTIONS_FILE}' with validated and scaled forecasts.")
-
+    except Exception as e:
+        print(f"\nAn unexpected error occurred.")
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    master_df = pd.read_csv(INPUT_FILE, parse_dates=['week'])
-    
-    baseline_rmse = calculate_baseline_performance(master_df, VALIDATION_CUTOFF_DATE)
-    xgb_rmse = train_and_evaluate_xgboost(master_df, VALIDATION_CUTOFF_DATE)
-    
-    print("\n--- FINAL EVALUATION ---")
-    print(f"Naive Baseline Model RMSE: {baseline_rmse:.4f}")
-    print(f"Prediction Model DBD RMSE: {xgb_rmse:.4f}")
-    
-    if xgb_rmse < baseline_rmse:
-        print("✅ MODEL VALIDATED: XGBoost model is more accurate than the naive baseline.")
-        retrain_and_forecast(master_df)
-    else:
-        print("❌ MODEL INVALIDATED: XGBoost model did not outperform the naive baseline.")
-        print("   Further feature engineering is required. No forecast file was generated.")
+    run_modeling_pipeline()
 
-    print("\n🚀 Full evaluation and training pipeline finished successfully.")
+#--- Final Evaluation on Test Set ---
+
+#Model: RandomForest
+    # R-squared (R²): 0.866
+    # Mean Absolute Error (MAE): 2.630
+    # Root Mean Squared Error (RMSE): 17.536
+
+#Model: XGBoost
+    # R-squared (R²): 0.929
+    # Mean Absolute Error (MAE): 2.062
+    # Root Mean Squared Error (RMSE): 17.714
