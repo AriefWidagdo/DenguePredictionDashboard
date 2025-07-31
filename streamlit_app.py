@@ -1,7 +1,6 @@
 # File: streamlit_app.py
 # The "Face" of the EWARS-ID system - Final Production Version
 # FINAL FIXES: Resolves JSON serialization error, data loading warnings, and excessive re-runs.
-# MODIFICATIONS: Added totals display and Open-Meteo weather chart
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -10,7 +9,6 @@ from streamlit_folium import st_folium
 import requests
 import io
 import re
-import plotly.express as px # Added for weather chart
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -75,13 +73,8 @@ def load_data(owner, repo, forecast_path, geojson_path):
             'Population': 'population'
         }, inplace=True)
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
-
-        # --- Add centroid calculation for weather API (based on GeoJSON geometry) ---
-        # Calculate centroids for mapping to weather coordinates
-        kabupaten_gdf['centroid'] = kabupaten_gdf.geometry.centroid
-        kabupaten_gdf['longitude'] = kabupaten_gdf.centroid.x
-        kabupaten_gdf['latitude'] = kabupaten_gdf.centroid.y
-        # Create a mapping from standardized name to lat/lon
+        # --- Create the reliable merge key on BOTH dataframes ---
+        forecast_df['merge_key'] = forecast_df['kabupaten_standard'].apply(standardize_name)
         kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'].apply(standardize_name)
         # Merge the full forecast dataset with the GeoDataFrame
         merged_gdf = kabupaten_gdf.merge(forecast_df, on='merge_key', how='left')
@@ -140,36 +133,6 @@ def create_map(gdf):
         popup=folium.features.GeoJsonPopup(fields=['popup_html'], aliases=[''])
     ).add_to(m)
     return m
-
-# --- Function to Fetch Weather Data from Open-Meteo ---
-@st.cache_data(ttl=24*3600) # Cache for 24 hours
-def fetch_weather_data(lat, lon, start_date, end_date):
-    """
-    Fetches daily historical weather data from Open-Meteo API.
-    """
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "start_date": start_date,
-        "end_date": end_date,
-        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "rain_sum"],
-        "timezone": "Asia/Makassar" # Use a common timezone for Indonesia
-    }
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status() # Raise an exception for bad status codes
-        data = response.json()
-        # Convert to DataFrame
-        df_weather = pd.DataFrame(data['daily'])
-        df_weather['date'] = pd.to_datetime(df_weather['time'])
-        return df_weather
-    except requests.exceptions.RequestException as e:
-        st.sidebar.error(f"Error fetching weather data: {e}")
-        return pd.DataFrame() # Return empty DataFrame on error
-    except KeyError as e:
-        st.sidebar.error(f"Unexpected response format from weather API: Missing key {e}")
-        return pd.DataFrame()
 
 # --- Main App Layout ---
 st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
@@ -231,49 +194,6 @@ if merged_data is not None and forecast_data is not None:
         st.session_state.selected_kabupaten = selected_kabupaten_from_selectbox
     selected_kabupaten = st.session_state.selected_kabupaten
 
-    # --- Weather Chart Section in Sidebar ---
-    st.sidebar.subheader("Historical Weather (Dec 2023)")
-    if selected_kabupaten:
-        # Get coordinates for the selected kabupaten
-        # Find the row in merged_data corresponding to the selected kabupaten
-        # We use the standardized name for matching
-        selected_kab_standardized = standardize_name(selected_kabupaten)
-        selected_kab_row = merged_data[merged_data['merge_key'] == selected_kab_standardized]
-
-        if not selected_kab_row.empty:
-            lat = selected_kab_row['latitude'].iloc[0]
-            lon = selected_kab_row['longitude'].iloc[0]
-
-            # Fetch weather data for December 2023
-            start_date = "2023-12-01"
-            end_date = "2023-12-31"
-            weather_df = fetch_weather_data(lat, lon, start_date, end_date)
-
-            if not weather_df.empty:
-                # Melt the dataframe for plotting multiple series
-                weather_melted = weather_df.melt(id_vars=['date'], value_vars=['temperature_2m_max', 'temperature_2m_min', 'precipitation_sum'],
-                                                var_name='Metric', value_name='Value')
-
-                # Map metric names to display names
-                metric_names = {
-                    'temperature_2m_max': 'Max Temp (°C)',
-                    'temperature_2m_min': 'Min Temp (°C)',
-                    'precipitation_sum': 'Precipitation (mm)'
-                }
-                weather_melted['Metric_Display'] = weather_melted['Metric'].map(metric_names)
-
-                # Create the Plotly chart
-                fig_weather = px.line(weather_melted, x='date', y='Value', color='Metric_Display',
-                                    title=f"Dec 2023 Weather for {selected_kabupaten}",
-                                    labels={'date': 'Date', 'Value': 'Value', 'Metric_Display': 'Metric'})
-                fig_weather.update_layout(height=300, showlegend=True)
-                st.sidebar.plotly_chart(fig_weather, use_container_width=True)
-            else:
-                st.sidebar.info("Weather data not available for this location/date.")
-        else:
-             st.sidebar.info("Coordinates not found for the selected region.")
-
-    # --- Forecast Trajectory Chart and Table ---
     if selected_kabupaten:
         st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
         trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
@@ -297,7 +217,6 @@ if merged_data is not None and forecast_data is not None:
             # Ensure columns are of correct type for display
             display_df['Forecast Cases'] = pd.to_numeric(display_df['Forecast Cases'], errors='coerce')
             st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
-
 
     # --- Main Map Section ---
     st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'})")
@@ -348,7 +267,6 @@ if merged_data is not None and forecast_data is not None:
             st.info("No data available for totals calculation on the selected date.")
     else:
         st.info("Please select a forecast date to see totals.")
-
 
     # --- Top 10 Regions Section ---
     if selected_date:
