@@ -1,7 +1,6 @@
 # File: streamlit_app.py
-# The "Face" of the EWARS-ID system - Final Production Version
-# FINAL FIXES: Resolves JSON serialization error, data loading warnings, and excessive re-runs.
-
+# The "Face" of the EWARS-ID system - Enhanced Production Version
+# Enhanced with better summary metrics, weather integration, and improved features
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -10,6 +9,10 @@ from streamlit_folium import st_folium
 import requests
 import io
 import re
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import numpy as np
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -19,11 +22,12 @@ st.set_page_config(
 )
 
 # --- Session State Initialization ---
-# Use session state to store loaded data and avoid re-fetching on every interaction
 if 'loaded_data' not in st.session_state:
     st.session_state.loaded_data = None
 if 'loaded_forecast' not in st.session_state:
     st.session_state.loaded_forecast = None
+if 'weather_data' not in st.session_state:
+    st.session_state.weather_data = None
 
 # --- Helper Function for Name Standardization ---
 @st.cache_data
@@ -34,15 +38,47 @@ def standardize_name(name):
     """
     if not isinstance(name, str):
         return None
-    
     name_lower = name.lower().strip()
-    
     prefixes = ['kabupaten administrasi', 'kota administrasi', 'kabupaten', 'kota', 'kab.']
     for prefix in prefixes:
         if name_lower.startswith(prefix):
             name_lower = name_lower.replace(prefix, '', 1).strip()
-            
     return re.sub(r'[^a-z0-9]', '', name_lower)
+
+# --- Weather Data Function ---
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_weather_data():
+    """Fetch weather data for major Indonesian cities."""
+    try:
+        # Get API key from secrets, with fallback
+        api_key = st.secrets.get("WEATHER_API_KEY", "")
+        if not api_key:
+            return None
+            
+        cities = [
+            {"name": "Jakarta", "lat": -6.2088, "lon": 106.8456},
+            {"name": "Surabaya", "lat": -7.2575, "lon": 112.7521},
+            {"name": "Medan", "lat": 3.5952, "lon": 98.6722},
+            {"name": "Bandung", "lat": -6.9175, "lon": 107.6191},
+            {"name": "Makassar", "lat": -5.1477, "lon": 119.4327}
+        ]
+        
+        weather_data = []
+        for city in cities:
+            url = f"http://api.openweathermap.org/data/2.5/weather?lat={city['lat']}&lon={city['lon']}&appid={api_key}&units=metric"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                weather_data.append({
+                    'city': city['name'],
+                    'temperature': data['main']['temp'],
+                    'humidity': data['main']['humidity'],
+                    'description': data['weather'][0]['description'].title(),
+                    'feels_like': data['main']['feels_like']
+                })
+        return pd.DataFrame(weather_data) if weather_data else None
+    except Exception as e:
+        return None
 
 # --- Caching Functions ---
 @st.cache_data
@@ -59,7 +95,6 @@ def load_data(owner, repo, forecast_path, geojson_path):
             "Accept": "application/vnd.github.v3.raw",
         }
         
-        # --- FIX: Corrected the URL construction by removing extra spaces ---
         forecast_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{forecast_path}"
         forecast_response = requests.get(forecast_url, headers=headers)
         forecast_response.raise_for_status()
@@ -67,9 +102,8 @@ def load_data(owner, repo, forecast_path, geojson_path):
         geojson_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/{geojson_path}"
         geojson_response = requests.get(geojson_url, headers=headers)
         geojson_response.raise_for_status()
-
+        
         # --- Read the downloaded content ---
-        # FIX: Removed deprecated 'date_parser' argument.
         forecast_df = pd.read_csv(
             io.StringIO(forecast_response.text),
             parse_dates=['Date']
@@ -88,7 +122,6 @@ def load_data(owner, repo, forecast_path, geojson_path):
         
         # Merge the full forecast dataset with the GeoDataFrame
         merged_gdf = kabupaten_gdf.merge(forecast_df, on='merge_key', how='left')
-
         return merged_gdf, forecast_df
         
     except Exception as e:
@@ -98,11 +131,11 @@ def load_data(owner, repo, forecast_path, geojson_path):
 def create_map(gdf):
     """
     Creates the Folium map with a choropleth layer and popups.
-    This version prevents the JSON serialization error.
+    Enhanced version with better styling and risk levels.
     """
     # Work on a copy to avoid modifying the original data
     map_gdf = gdf.copy()
-
+    
     # --- CRITICAL FIX: Convert Date column to string BEFORE passing to Folium ---
     if 'Date' in map_gdf.columns and pd.api.types.is_datetime64_any_dtype(map_gdf['Date']):
         map_gdf['forecast_week_str'] = map_gdf['Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
@@ -110,18 +143,25 @@ def create_map(gdf):
         map_gdf = map_gdf.drop(columns=['Date'])
     else:
         map_gdf['forecast_week_str'] = 'N/A'
-
+    
     # Ensure data is numeric for calculations
     map_gdf['predicted_cases_numeric'] = pd.to_numeric(map_gdf['predicted_cases'], errors='coerce').fillna(0)
     map_gdf['population_numeric'] = pd.to_numeric(map_gdf['population'], errors='coerce').fillna(0)
-    
     map_gdf['incidence_rate'] = map_gdf.apply(
         lambda row: (row['predicted_cases_numeric'] / row['population_numeric']) * 100000 if row['population_numeric'] > 0 else 0,
         axis=1
     )
-
+    
+    # Create risk categories
+    map_gdf['risk_level'] = pd.cut(
+        map_gdf['incidence_rate'],
+        bins=[0, 10, 25, 50, float('inf')],
+        labels=['Low', 'Medium', 'High', 'Very High'],
+        include_lowest=True
+    )
+    
     m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
-
+    
     folium.Choropleth(
         geo_data=map_gdf,
         data=map_gdf,
@@ -132,19 +172,29 @@ def create_map(gdf):
         line_opacity=0.3,
         legend_name='Predicted Dengue Cases (Next Week)',
         name='Predicted Cases',
-        nan_fill_color='lightgray' # Make missing data more visible
+        nan_fill_color='lightgray'
     ).add_to(m)
-
-    # Generate popup HTML using the string date and numeric values
+    
+    # Enhanced popup HTML with risk level and better styling
     map_gdf['popup_html'] = map_gdf.apply(
-        lambda row: f"""<div style="font-family: sans-serif;">
-            <h4>📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
-            <p><b>Forecast Week:</b> {row['forecast_week_str']}</p>
-            <p><b>Predicted Cases:</b> {int(row['predicted_cases_numeric'])}</p>
-            <p><b>Population:</b> {int(row['population_numeric']) if not pd.isna(row['population_numeric']) else 'N/A'}</p>
-            <p><b>Incidence Rate (/100k):</b> {row['incidence_rate']:.2f}</p>
-        </div>""", axis=1)
-
+        lambda row: f"""
+        <div style="font-family: Arial, sans-serif; min-width: 250px;">
+            <h4 style="margin-bottom: 10px; color: #2c3e50;">📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
+            <div style="border-left: 4px solid #e74c3c; padding-left: 12px; background-color: #f8f9fa; padding: 10px; border-radius: 5px;">
+                <p style="margin: 5px 0;"><strong>📅 Forecast Week:</strong> {row['forecast_week_str']}</p>
+                <p style="margin: 5px 0;"><strong>🦟 Predicted Cases:</strong> {int(row['predicted_cases_numeric'])}</p>
+                <p style="margin: 5px 0;"><strong>👥 Population:</strong> {int(row['population_numeric']):,} {'' if not pd.isna(row['population_numeric']) else 'N/A'}</p>
+                <p style="margin: 5px 0;"><strong>📊 Incidence Rate:</strong> {row['incidence_rate']:.2f}/100k</p>
+                <p style="margin: 5px 0;"><strong>⚠️ Risk Level:</strong> 
+                    <span style="color: {'#e74c3c' if row['risk_level'] in ['High', 'Very High'] else '#f39c12' if row['risk_level'] == 'Medium' else '#27ae60'}; font-weight: bold;">
+                        {row['risk_level']}
+                    </span>
+                </p>
+            </div>
+        </div>
+        """, axis=1
+    )
+    
     folium.GeoJson(
         map_gdf,
         style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0},
@@ -154,19 +204,59 @@ def create_map(gdf):
     
     return m
 
-# --- Main App Layout ---
-st.title("🇮🇩 EWARS-ID: Dengue Forecast Dashboard")
-st.markdown("An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo.")
+def create_trend_chart(forecast_data):
+    """Create a trend chart showing national forecast over time."""
+    if forecast_data is None or forecast_data.empty:
+        return None
+    
+    # Aggregate by date
+    trend_data = forecast_data.groupby('Date').agg({
+        'predicted_cases': lambda x: pd.to_numeric(x, errors='coerce').sum(),
+        'population': lambda x: pd.to_numeric(x, errors='coerce').sum()
+    }).reset_index()
+    
+    trend_data['incidence_rate'] = (trend_data['predicted_cases'] / trend_data['population']) * 100000
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=trend_data['Date'],
+        y=trend_data['predicted_cases'],
+        mode='lines+markers',
+        name='Total Predicted Cases',
+        line=dict(color='#e74c3c', width=3),
+        marker=dict(size=8, color='#e74c3c'),
+        hovertemplate='<b>Date:</b> %{x}<br><b>Cases:</b> %{y:,.0f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title={
+            'text': 'National Dengue Forecast Trend',
+            'x': 0.5,
+            'xanchor': 'center'
+        },
+        xaxis_title='Date',
+        yaxis_title='Total Predicted Cases',
+        template='plotly_white',
+        height=400,
+        hovermode='x unified'
+    )
+    
+    return fig
 
+# --- Main App Layout ---
+st.title("🇮🇩 EWARS-ID: Enhanced Dengue Forecast Dashboard")
+st.markdown("*An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo*")
+
+# Configuration
 OWNER = "AriefWidagdo"
 PRIVATE_REPO_NAME = "data-raw"
 FORECAST_FILE_PATH = "january_2024_predictions.csv"
 GEOJSON_PATH = "gadm41_IDN_2.json"
 
 # --- Load Data Once ---
-# Check session state first, then load if needed
 if st.session_state.loaded_data is None or st.session_state.loaded_forecast is None:
-    with st.spinner("Loading data from GitHub..."):
+    with st.spinner("🔄 Loading data from GitHub..."):
         merged_data, forecast_data = load_data(OWNER, PRIVATE_REPO_NAME, FORECAST_FILE_PATH, GEOJSON_PATH)
         st.session_state.loaded_data = merged_data
         st.session_state.loaded_forecast = forecast_data
@@ -175,127 +265,305 @@ else:
     forecast_data = st.session_state.loaded_forecast
 
 if merged_data is not None and forecast_data is not None:
-    
     unique_dates = sorted(forecast_data['Date'].unique())
-    
     if unique_dates:
         # Use session state for the selected date to avoid resetting on map interaction
         if 'selected_date' not in st.session_state:
-            st.session_state.selected_date = unique_dates[0] # Default to first date
+            st.session_state.selected_date = unique_dates[0]
         
-        # Update session state only when user selects a new date
+        # Date selector with enhanced formatting
         selected_date_from_selectbox = st.selectbox(
-            "Select Forecast Date for Map View:",
+            "📅 Select Forecast Date for Analysis:",
             unique_dates,
             index=unique_dates.index(st.session_state.selected_date) if st.session_state.selected_date in unique_dates else 0,
-            format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d')
+            format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d (%A)')
         )
         
-        # Only update session state if the selection actually changed
         if selected_date_from_selectbox != st.session_state.selected_date:
             st.session_state.selected_date = selected_date_from_selectbox
-
+        
         selected_date = st.session_state.selected_date
         
-        # Filter the merged data for the selected date, keeping unmatched regions for a full map
+        # Filter the merged data for the selected date
         map_ready_gdf = merged_data[
             (merged_data['Date'] == selected_date) | (pd.isnull(merged_data['Date']))
         ].copy()
-        
     else:
-        st.warning("No forecast dates found in the data.")
+        st.warning("⚠️ No forecast dates found in the data.")
         selected_date = None
         map_ready_gdf = merged_data.copy()
 
-    # --- Sidebar Controls ---
-    st.sidebar.header("Forecast Trajectory")
-    kabupaten_list = sorted(forecast_data['kabupaten_standard'].unique())
+    # --- ENHANCED NATIONAL SUMMARY SECTION ---
+    st.subheader(f"📊 National Summary for {selected_date.strftime('%Y-%m-%d (%A)') if selected_date else 'N/A'}")
     
-    # Use session state for selected kabupaten in sidebar too
-    if 'selected_kabupaten' not in st.session_state:
-         st.session_state.selected_kabupaten = kabupaten_list[0] if kabupaten_list else None
-
-    selected_kabupaten_from_selectbox = st.sidebar.selectbox(
-        "Select a Kabupaten/Kota:",
-        kabupaten_list,
-        index=kabupaten_list.index(st.session_state.selected_kabupaten) if st.session_state.selected_kabupaten in kabupaten_list else 0
-    )
-    
-    if selected_kabupaten_from_selectbox != st.session_state.selected_kabupaten:
-        st.session_state.selected_kabupaten = selected_kabupaten_from_selectbox
-
-    selected_kabupaten = st.session_state.selected_kabupaten
-    
-    if selected_kabupaten:
-        st.sidebar.subheader(f"4-Week Forecast for {selected_kabupaten}")
-        trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
+    if selected_date:
+        # Use forecast_data directly for more reliable filtering
+        summary_data = forecast_data[
+            (forecast_data['Date'] == selected_date) & 
+            (forecast_data['predicted_cases'].notna()) & 
+            (forecast_data['population'].notna())
+        ].copy()
         
-        if not trajectory_df.empty:
-            population_for_kab = pd.to_numeric(trajectory_df['population'].iloc[0], errors='coerce')
-            if pd.notna(population_for_kab) and population_for_kab > 0:
-                trajectory_df['incidence_rate'] = (pd.to_numeric(trajectory_df['predicted_cases'], errors='coerce') / population_for_kab) * 100000
+        if not summary_data.empty:
+            # Ensure numeric data
+            summary_data['predicted_cases'] = pd.to_numeric(summary_data['predicted_cases'], errors='coerce')
+            summary_data['population'] = pd.to_numeric(summary_data['population'], errors='coerce')
+            
+            # Remove rows that became NaN after conversion
+            summary_data = summary_data.dropna(subset=['predicted_cases', 'population'])
+            
+            if not summary_data.empty:
+                # Calculate metrics
+                total_population = summary_data['population'].sum()
+                total_predicted_cases = summary_data['predicted_cases'].sum()
+                regions_with_data = len(summary_data)
+                
+                if total_population > 0:
+                    average_incidence_rate = (total_predicted_cases / total_population) * 100000
+                else:
+                    average_incidence_rate = 0
+                
+                # Display metrics in enhanced format
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric(
+                        label="🏘️ Total Population",
+                        value=f"{total_population:,.0f}",
+                        help="Total population in regions with forecast data"
+                    )
+                
+                with col2:
+                    st.metric(
+                        label="🦟 Predicted Cases",
+                        value=f"{total_predicted_cases:,.0f}",
+                        help="Total predicted dengue cases for next week"
+                    )
+                
+                with col3:
+                    st.metric(
+                        label="📈 Avg Incidence Rate",
+                        value=f"{average_incidence_rate:.2f}/100k",
+                        help="Weighted average incidence rate per 100,000 population"
+                    )
+                
+                with col4:
+                    st.metric(
+                        label="🗺️ Regions Covered",
+                        value=f"{regions_with_data}",
+                        help="Number of regions with forecast data"
+                    )
+                
+                # Risk level distribution
+                summary_data['incidence_rate'] = (summary_data['predicted_cases'] / summary_data['population']) * 100000
+                summary_data['risk_level'] = pd.cut(
+                    summary_data['incidence_rate'],
+                    bins=[0, 10, 25, 50, float('inf')],
+                    labels=['Low', 'Medium', 'High', 'Very High'],
+                    include_lowest=True
+                )
+                
+                risk_counts = summary_data['risk_level'].value_counts()
+                
+                if not risk_counts.empty:
+                    st.subheader("🚨 Risk Level Distribution")
+                    risk_cols = st.columns(len(risk_counts))
+                    risk_colors = {'Low': '🟢', 'Medium': '🟡', 'High': '🟠', 'Very High': '🔴'}
+                    
+                    for i, (level, count) in enumerate(risk_counts.items()):
+                        if i < len(risk_cols):
+                            risk_cols[i].metric(
+                                label=f"{risk_colors.get(level, '⚪')} {level} Risk",
+                                value=f"{count} region{'s' if count != 1 else ''}",
+                                help=f"Regions classified as {level.lower()} risk"
+                            )
             else:
-                trajectory_df['incidence_rate'] = 0
-            
-            chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
-            # Ensure predicted_cases is numeric for the chart
-            chart_df['predicted_cases'] = pd.to_numeric(chart_df['predicted_cases'], errors='coerce')
-            st.sidebar.line_chart(chart_df, y='predicted_cases')
-            
-            display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
-            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-            display_df.rename(columns={
-                'Date': 'Week',
-                'predicted_cases': 'Forecast Cases',
-                'incidence_rate': 'Incidence Rate (/100k)'
-            }, inplace=True)
-            # Ensure columns are of correct type for display
-            display_df['Forecast Cases'] = pd.to_numeric(display_df['Forecast Cases'], errors='coerce')
-            st.sidebar.dataframe(display_df.set_index('Week'), use_container_width=True)
-
-    # --- Main Map Section ---
-    st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'})")
+                st.warning("⚠️ No valid numeric data available for calculations on the selected date.")
+        else:
+            st.info("ℹ️ No forecast data available for the selected date.")
     
-    # --- KEY FIX: Use `returned_objects=[]` and a stable key ---
-    # Setting `returned_objects=[]` tells st_folium we don't need interaction data back,
-    # which can sometimes prevent re-runs. A stable key based on the *data* helps too,
-    # but we use the selected date which changes when needed.
+    # --- NATIONAL TREND CHART ---
+    if not forecast_data.empty:
+        st.subheader("📈 National Forecast Trend")
+        trend_fig = create_trend_chart(forecast_data)
+        if trend_fig:
+            st.plotly_chart(trend_fig, use_container_width=True)
+    
+    # --- Main Map Section ---
+    st.subheader(f"🗺️ Interactive Risk Map - {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'}")
+    
     map_object = create_map(map_ready_gdf)
     st_folium(
         map_object,
         width='100%',
-        height=550,
-        key=f"map_{selected_date.strftime('%Y%m%d') if selected_date else 'default'}",
-        returned_objects=[] # Crucial for preventing re-runs on interaction
+        height=600,
+        key=f"enhanced_map_{selected_date.strftime('%Y%m%d') if selected_date else 'default'}",
+        returned_objects=[]
     )
+
+    # --- Sidebar Controls ---
+    with st.sidebar:
+        st.header("🎛️ Dashboard Controls")
+        
+        # Weather data section
+        st.subheader("🌤️ Weather Information")
+        if st.button("Refresh Weather Data", help="Update current weather conditions"):
+            with st.spinner("Fetching weather data..."):
+                st.session_state.weather_data = get_weather_data()
+        
+        # Display weather if available
+        weather_data = st.session_state.weather_data or get_weather_data()
+        if weather_data is not None and not weather_data.empty:
+            st.success("Weather data loaded successfully!")
+            for _, row in weather_data.iterrows():
+                with st.container():
+                    st.metric(
+                        label=f"🏙️ {row['city']}",
+                        value=f"{row['temperature']:.1f}°C",
+                        delta=f"Feels like {row['feels_like']:.1f}°C"
+                    )
+                    st.caption(f"💧 {row['humidity']}% humidity • {row['description']}")
+        else:
+            if 'WEATHER_API_KEY' not in st.secrets:
+                st.info("Add `WEATHER_API_KEY` to secrets to enable weather data")
+            else:
+                st.warning("Weather data currently unavailable")
+        
+        st.markdown("---")
+        
+        # Region analysis
+        st.subheader("🔍 Region Analysis")
+        kabupaten_list = sorted(forecast_data['kabupaten_standard'].unique())
+        
+        if 'selected_kabupaten' not in st.session_state and kabupaten_list:
+            st.session_state.selected_kabupaten = kabupaten_list[0]
+        
+        if kabupaten_list:
+            selected_kabupaten = st.selectbox(
+                "Select a Region:",
+                kabupaten_list,
+                index=kabupaten_list.index(st.session_state.selected_kabupaten) if st.session_state.selected_kabupaten in kabupaten_list else 0
+            )
+            
+            if selected_kabupaten != st.session_state.get('selected_kabupaten'):
+                st.session_state.selected_kabupaten = selected_kabupaten
+            
+            # Region-specific analysis
+            if selected_kabupaten:
+                trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
+                
+                if not trajectory_df.empty:
+                    st.markdown(f"### 📊 {selected_kabupaten}")
+                    
+                    # Convert to numeric
+                    trajectory_df['predicted_cases'] = pd.to_numeric(trajectory_df['predicted_cases'], errors='coerce')
+                    population_for_kab = pd.to_numeric(trajectory_df['population'].iloc[0], errors='coerce')
+                    
+                    if pd.notna(population_for_kab) and population_for_kab > 0:
+                        trajectory_df['incidence_rate'] = (trajectory_df['predicted_cases'] / population_for_kab) * 100000
+                    else:
+                        trajectory_df['incidence_rate'] = 0
+                    
+                    # Current week metrics
+                    current_data = trajectory_df[trajectory_df['Date'] == selected_date]
+                    if not current_data.empty:
+                        current_cases = current_data['predicted_cases'].iloc[0]
+                        current_incidence = current_data['incidence_rate'].iloc[0]
+                        
+                        st.metric("🦟 Cases This Week", f"{current_cases:.0f}")
+                        st.metric("📊 Incidence Rate", f"{current_incidence:.2f}/100k")
+                    
+                    # Mini trend chart
+                    chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
+                    st.line_chart(chart_df, height=200)
+                    
+                    # Data table
+                    display_df = trajectory_df[['Date', 'predicted_cases', 'incidence_rate']].copy()
+                    display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
+                    display_df.rename(columns={
+                        'Date': 'Week',
+                        'predicted_cases': 'Forecast Cases',
+                        'incidence_rate': 'Rate (/100k)'
+                    }, inplace=True)
+                    
+                    st.dataframe(
+                        display_df.set_index('Week'),
+                        use_container_width=True,
+                        column_config={
+                            "Forecast Cases": st.column_config.NumberColumn(format="%.0f"),
+                            "Rate (/100k)": st.column_config.NumberColumn(format="%.2f")
+                        }
+                    )
 
     # --- Top 10 Regions Section ---
     if selected_date:
-        # Create a clean dataframe for top 10 calculation
-        top10_df = map_ready_gdf[map_ready_gdf['predicted_cases'].notna()].copy()
-        top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'], errors='coerce')
-        top10_df['population'] = pd.to_numeric(top10_df['population'], errors='coerce')
+        st.subheader(f"🏆 Top 10 Highest Risk Regions for {selected_date.strftime('%Y-%m-%d')}")
         
-        top10_df_clean = top10_df.dropna(subset=['predicted_cases']).copy()
-        if not top10_df_clean.empty:
-            top10_df_clean = top10_df_clean.nlargest(10, 'predicted_cases')
+        top10_df = forecast_data[forecast_data['Date'] == selected_date].copy()
+        if not top10_df.empty:
+            top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'], errors='coerce')
+            top10_df['population'] = pd.to_numeric(top10_df['population'], errors='coerce')
+            top10_df_clean = top10_df.dropna(subset=['predicted_cases']).copy()
             
-            top10_df_clean['incidence_rate'] = top10_df_clean.apply(
-                lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
-                axis=1
-            )
-            top10_df_display = top10_df_clean[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
-            top10_df_display.rename(columns={
-                'NAME_2': 'Region',
-                'predicted_cases': 'Predicted Cases',
-                'incidence_rate': 'Incidence Rate (/100k)'
-            }, inplace=True)
-            # Ensure numeric types for display
-            top10_df_display['Predicted Cases'] = top10_df_display['Predicted Cases'].astype(int)
-            st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
-            st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
+            if not top10_df_clean.empty:
+                top10_df_display = top10_df_clean.nlargest(10, 'predicted_cases')
+                top10_df_display['incidence_rate'] = top10_df_display.apply(
+                    lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
+                    axis=1
+                )
+                
+                # Add risk level
+                top10_df_display['risk_level'] = pd.cut(
+                    top10_df_display['incidence_rate'],
+                    bins=[0, 10, 25, 50, float('inf')],
+                    labels=['🟢 Low', '🟡 Medium', '🟠 High', '🔴 Very High'],
+                    include_lowest=True
+                )
+                
+                display_columns = ['kabupaten_standard', 'predicted_cases', 'incidence_rate', 'risk_level']
+                final_display_df = top10_df_display[display_columns].copy()
+                final_display_df.rename(columns={
+                    'kabupaten_standard': 'Region',
+                    'predicted_cases': 'Predicted Cases',
+                    'incidence_rate': 'Incidence Rate (/100k)',
+                    'risk_level': 'Risk Level'
+                }, inplace=True)
+                
+                # Format data
+                final_display_df['Predicted Cases'] = final_display_df['Predicted Cases'].astype(int)
+                final_display_df['Incidence Rate (/100k)'] = final_display_df['Incidence Rate (/100k)'].round(2)
+                
+                st.dataframe(
+                    final_display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Predicted Cases": st.column_config.NumberColumn(
+                            "Predicted Cases",
+                            format="%d"
+                        ),
+                        "Incidence Rate (/100k)": st.column_config.NumberColumn(
+                            "Incidence Rate (/100k)",
+                            format="%.2f"
+                        )
+                    }
+                )
+            else:
+                st.info("ℹ️ No valid data available for the Top 10 list for the selected date.")
         else:
-            st.info("No valid data available for the Top 10 list for the selected date.")
-
+            st.info("ℹ️ No data available for the selected date.")
 else:
-    st.error("Data files could not be loaded. Please check deployment logs for more information.")
+    st.error("❌ Data files could not be loaded. Please check deployment logs for more information.")
+
+# --- Footer ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: #666; padding: 20px;'>
+        <p><strong>EWARS-ID Enhanced Dashboard</strong></p>
+        <p>Developed by M Arief Widagdo • Enhanced with weather integration and advanced analytics</p>
+        <p>🦟 Dengue Fever Early Warning and Response System for Indonesia 🇮🇩</p>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
