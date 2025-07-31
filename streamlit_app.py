@@ -1,5 +1,5 @@
 # File: streamlit_app.py
-# The "Face" of the EWARS-ID system - Enhanced Production Version
+# The "Face" of the EWARS-ID system - Enhanced Production Version (No Plotly)
 # Enhanced with better summary metrics, weather integration, and improved features
 import streamlit as st
 import pandas as pd
@@ -9,8 +9,6 @@ from streamlit_folium import st_folium
 import requests
 import io
 import re
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
 
@@ -204,46 +202,6 @@ def create_map(gdf):
     
     return m
 
-def create_trend_chart(forecast_data):
-    """Create a trend chart showing national forecast over time."""
-    if forecast_data is None or forecast_data.empty:
-        return None
-    
-    # Aggregate by date
-    trend_data = forecast_data.groupby('Date').agg({
-        'predicted_cases': lambda x: pd.to_numeric(x, errors='coerce').sum(),
-        'population': lambda x: pd.to_numeric(x, errors='coerce').sum()
-    }).reset_index()
-    
-    trend_data['incidence_rate'] = (trend_data['predicted_cases'] / trend_data['population']) * 100000
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=trend_data['Date'],
-        y=trend_data['predicted_cases'],
-        mode='lines+markers',
-        name='Total Predicted Cases',
-        line=dict(color='#e74c3c', width=3),
-        marker=dict(size=8, color='#e74c3c'),
-        hovertemplate='<b>Date:</b> %{x}<br><b>Cases:</b> %{y:,.0f}<extra></extra>'
-    ))
-    
-    fig.update_layout(
-        title={
-            'text': 'National Dengue Forecast Trend',
-            'x': 0.5,
-            'xanchor': 'center'
-        },
-        xaxis_title='Date',
-        yaxis_title='Total Predicted Cases',
-        template='plotly_white',
-        height=400,
-        hovermode='x unified'
-    )
-    
-    return fig
-
 # --- Main App Layout ---
 st.title("🇮🇩 EWARS-ID: Enhanced Dengue Forecast Dashboard")
 st.markdown("*An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo*")
@@ -382,12 +340,30 @@ if merged_data is not None and forecast_data is not None:
         else:
             st.info("ℹ️ No forecast data available for the selected date.")
     
-    # --- NATIONAL TREND CHART ---
+    # --- NATIONAL TREND CHART (Using Streamlit's built-in chart) ---
     if not forecast_data.empty:
         st.subheader("📈 National Forecast Trend")
-        trend_fig = create_trend_chart(forecast_data)
-        if trend_fig:
-            st.plotly_chart(trend_fig, use_container_width=True)
+        
+        # Aggregate by date for trend analysis
+        trend_data = forecast_data.groupby('Date').agg({
+            'predicted_cases': lambda x: pd.to_numeric(x, errors='coerce').sum(),
+            'population': lambda x: pd.to_numeric(x, errors='coerce').sum()
+        }).reset_index()
+        
+        trend_data['incidence_rate'] = (trend_data['predicted_cases'] / trend_data['population']) * 100000
+        
+        # Create two columns for dual charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Total Predicted Cases Over Time**")
+            chart_data = trend_data.set_index('Date')[['predicted_cases']]
+            st.line_chart(chart_data, height=300)
+        
+        with col2:
+            st.markdown("**National Incidence Rate Over Time**")
+            chart_data_rate = trend_data.set_index('Date')[['incidence_rate']]
+            st.line_chart(chart_data_rate, height=300)
     
     # --- Main Map Section ---
     st.subheader(f"🗺️ Interactive Risk Map - {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'}")
