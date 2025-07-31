@@ -220,23 +220,19 @@ if merged_data is not None and forecast_data is not None:
 
     # --- Main Map Section ---
     st.subheader(f"National Risk Overview (Forecast for {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'})")
-    # --- KEY FIX: Use `returned_objects=[]` and a stable key ---
-    # Setting `returned_objects=[]` tells st_folium we don't need interaction data back,
-    # which can sometimes prevent re-runs. A stable key based on the *data* helps too,
-    # but we use the selected date which changes when needed.
     map_object = create_map(map_ready_gdf)
     st_folium(
         map_object,
         width='100%',
         height=550,
         key=f"map_{selected_date.strftime('%Y%m%d') if selected_date else 'default'}",
-        returned_objects=[] # Crucial for preventing re-runs on interaction
+        returned_objects=[]
     )
 
-    # --- MODIFIED SECTION: Display Totals Below the Map ---
+    # --- SECTION WITH FIX: Display Totals Below the Map ---
     if selected_date:
-        # MODIFICATION: Filter based on the presence of data, not the date column.
-        # This is more robust and aligns with the logic in the Top 10 section.
+        # This filter is now robust. It finds all rows with forecast data,
+        # just like the "Top 10" section does.
         totals_df = map_ready_gdf[map_ready_gdf['predicted_cases'].notna()].copy()
 
         if not totals_df.empty:
@@ -247,9 +243,8 @@ if merged_data is not None and forecast_data is not None:
             # Calculate Totals
             total_population = totals_df['population'].sum()
             total_predicted_cases = totals_df['predicted_cases'].sum()
-            
+
             # Calculate weighted average incidence rate
-            # This logic correctly handles potential division by zero
             if total_population > 0:
                  average_incidence_rate = (total_predicted_cases / total_population) * 100000
             else:
@@ -261,13 +256,8 @@ if merged_data is not None and forecast_data is not None:
             col1.metric("Total Population (in Forecast)", f"{total_population:,.0f}")
             col2.metric("Total Predicted Cases (Next Week)", f"{total_predicted_cases:,.0f}")
             col3.metric("Weighted Avg. Incidence Rate (/100k)", f"{average_incidence_rate:.2f}")
-
         else:
             st.info("No data available for totals calculation on the selected date.")
-    else:
-        st.info("Please select a forecast date to see totals.")
-    # --- End of Modified Section ---
-
 
     # --- Top 10 Regions Section ---
     if selected_date:
@@ -276,13 +266,14 @@ if merged_data is not None and forecast_data is not None:
         top10_df['predicted_cases'] = pd.to_numeric(top10_df['predicted_cases'], errors='coerce')
         top10_df['population'] = pd.to_numeric(top10_df['population'], errors='coerce')
         top10_df_clean = top10_df.dropna(subset=['predicted_cases']).copy()
+
         if not top10_df_clean.empty:
-            top10_df_clean = top10_df_clean.nlargest(10, 'predicted_cases')
-            top10_df_clean['incidence_rate'] = top10_df_clean.apply(
+            top10_df_display = top10_df_clean.nlargest(10, 'predicted_cases')
+            top10_df_display['incidence_rate'] = top10_df_display.apply(
                 lambda row: (row['predicted_cases'] / row['population']) * 100000 if row['population'] > 0 else 0,
                 axis=1
             )
-            top10_df_display = top10_df_clean[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
+            top10_df_display = top10_df_display[['NAME_2', 'predicted_cases', 'incidence_rate']].copy()
             top10_df_display.rename(columns={
                 'NAME_2': 'Region',
                 'predicted_cases': 'Predicted Cases',
@@ -291,7 +282,7 @@ if merged_data is not None and forecast_data is not None:
             # Ensure numeric types for display
             top10_df_display['Predicted Cases'] = top10_df_display['Predicted Cases'].astype(int)
             st.subheader(f"Top 10 Highest Predicted Cases for {selected_date.strftime('%Y-%m-%d')}")
-            st.dataframe(top10_df_display, hide_index=True, use_container_width=True)
+            st.dataframe(top10_df_display.set_index('Region'), use_container_width=True)
         else:
             st.info("No valid data available for the Top 10 list for the selected date.")
 else:
