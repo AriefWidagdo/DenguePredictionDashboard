@@ -6,3 +6,4 @@ streamlit-folium
 requests
 rapidfuzz
 plotly
+numpy
