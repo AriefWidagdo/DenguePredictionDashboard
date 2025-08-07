@@ -1,6 +1,7 @@
 # File: streamlit_app.py
 # The "Face" of the EWARS-ID system - Enhanced Production Version
 # Enhanced with better summary metrics, weather integration, and improved features
+# Includes weather data in map popups
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -13,12 +14,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="EWARS-ID Dengue Forecast by M Arief Widagdo",
     page_icon="🇮🇩",
     layout="wide"
 )
+
 # --- Session State Initialization ---
 if 'loaded_data' not in st.session_state:
     st.session_state.loaded_data = None
@@ -26,6 +29,7 @@ if 'loaded_forecast' not in st.session_state:
     st.session_state.loaded_forecast = None
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = None
+
 # --- Helper Function for Name Standardization ---
 @st.cache_data
 def standardize_name(name):
@@ -41,38 +45,67 @@ def standardize_name(name):
         if name_lower.startswith(prefix):
             name_lower = name_lower.replace(prefix, '', 1).strip()
     return re.sub(r'[^a-z0-9]', '', name_lower)
-# --- Weather Data Function ---
+
+# --- Weather Data Function (Modified to fetch for regions) ---
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_weather_data():
-    """Fetch weather data for major Indonesian cities."""
+def get_weather_data(region_centroids=None):
+    """
+    Fetch weather data for a list of region centroids.
+    If region_centroids is None, fetches for major Indonesian cities (fallback).
+    """
     try:
         # Get API key from secrets, with fallback
         api_key = st.secrets.get("WEATHER_API_KEY", "")
         if not api_key:
             return None
-        cities = [
-            {"name": "Jakarta", "lat": -6.2088, "lon": 106.8456},
-            {"name": "Surabaya", "lat": -7.2575, "lon": 112.7521},
-            {"name": "Medan", "lat": 3.5952, "lon": 98.6722},
-            {"name": "Bandung", "lat": -6.9175, "lon": 107.6191},
-            {"name": "Makassar", "lat": -5.1477, "lon": 119.4327}
-        ]
+
+        # Determine the list of locations to fetch weather for
+        if region_centroids is None:
+            # Fallback to major cities if no centroids provided
+            locations = [
+                {"name": "Jakarta", "lat": -6.2088, "lon": 106.8456},
+                {"name": "Surabaya", "lat": -7.2575, "lon": 112.7521},
+                {"name": "Medan", "lat": 3.5952, "lon": 98.6722},
+                {"name": "Bandung", "lat": -6.9175, "lon": 107.6191},
+                {"name": "Makassar", "lat": -5.1477, "lon": 119.4327}
+            ]
+        else:
+            # Use provided region centroids
+            locations = region_centroids
+
         weather_data = []
-        for city in cities:
-            url = f"http://api.openweathermap.org/data/2.5/weather?lat={city['lat']}&lon={city['lon']}&appid={api_key}&units=metric"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                weather_data.append({
-                    'city': city['name'],
-                    'temperature': data['main']['temp'],
-                    'humidity': data['main']['humidity'],
-                    'description': data['weather'][0]['description'].title(),
-                    'feels_like': data['main']['feels_like']
-                })
-        return pd.DataFrame(weather_data) if weather_data else None
+        for location in locations:
+            # Basic validation to prevent API errors
+            try:
+                lat = float(location['lat'])
+                lon = float(location['lon'])
+            except (ValueError, TypeError):
+                st.warning(f"Invalid coordinates for {location.get('name', 'Unknown')}: lat={location.get('lat')}, lon={location.get('lon')}")
+                continue
+
+            url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+            try:
+                response = requests.get(url, timeout=10) # Increased timeout slightly
+                if response.status_code == 200:
+                    data = response.json()
+                    weather_data.append({
+                        'region_name': location['name'], # Use 'region_name' for clarity
+                        'temperature': data['main']['temp'],
+                        'humidity': data['main']['humidity'],
+                        'description': data['weather'][0]['description'].title(),
+                        'feels_like': data['main']['feels_like']
+                    })
+                else:
+                    st.warning(f"Failed to fetch weather for {location['name']} (Status {response.status_code})")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Network error fetching weather for {location['name']}: {e}")
+
+        # Return as dictionary for easy lookup by region name
+        return {item['region_name']: item for item in weather_data} if weather_data else {}
     except Exception as e:
-        return None
+        st.error(f"Error in get_weather_data: {e}")
+        return {}
+
 # --- Caching Functions ---
 @st.cache_data
 def load_data(owner, repo, forecast_path, geojson_path):
@@ -104,6 +137,34 @@ def load_data(owner, repo, forecast_path, geojson_path):
             'Population': 'population'
         }, inplace=True)
         kabupaten_gdf = gpd.read_file(io.BytesIO(geojson_response.content))
+
+        # --- Project GeoDataFrame for accurate centroid calculation (optional but good practice) ---
+        # Using EPSG:32748 (UTM Zone 48S) for Indonesia. Adjust if needed for northern regions.
+        # If projection causes issues, skip this step and calculate centroids in WGS84.
+        try:
+            # Check if it's already projected or geographic
+            if kabupaten_gdf.crs is None or kabupaten_gdf.crs.is_geographic:
+                 # If geographic (like WGS84), project it
+                 kabupaten_gdf_projected = kabupaten_gdf.to_crs(epsg=32748)
+            else:
+                 # If already projected, use as is for centroid calculation
+                 kabupaten_gdf_projected = kabupaten_gdf
+
+            # Calculate centroids in the projected CRS
+            centroids_projected = kabupaten_gdf_projected.geometry.centroid
+            # Transform centroids back to WGS84 (lat/lon) for OpenWeatherMap API
+            centroids_wgs84 = centroids_projected.to_crs(epsg=4326)
+            # Extract lat and lon
+            kabupaten_gdf['lat'] = centroids_wgs84.y
+            kabupaten_gdf['lon'] = centroids_wgs84.x
+        except Exception as proj_error:
+            # Fallback: Calculate centroids directly in WGS84 if projection fails
+            st.warning("Could not project GeoDataFrame for centroid calculation. Calculating centroids in WGS84. Accuracy might vary.")
+            centroids_wgs84 = kabupaten_gdf.geometry.centroid
+            kabupaten_gdf['lat'] = centroids_wgs84.y
+            kabupaten_gdf['lon'] = centroids_wgs84.x
+
+
         # --- Create the reliable merge key on BOTH dataframes ---
         forecast_df['merge_key'] = forecast_df['kabupaten_standard'].apply(standardize_name)
         kabupaten_gdf['merge_key'] = kabupaten_gdf['NAME_2'].apply(standardize_name)
@@ -113,10 +174,11 @@ def load_data(owner, repo, forecast_path, geojson_path):
     except Exception as e:
         st.error(f"FATAL ERROR: An error occurred during data loading or processing: {e}")
         return None, None
-def create_map(gdf):
+
+def create_map(gdf, region_weather_data=None):
     """
     Creates the Folium map with a choropleth layer and popups.
-    Enhanced version with better styling and risk levels.
+    Enhanced version with better styling, risk levels, AND REGIONAL WEATHER.
     """
     # Work on a copy to avoid modifying the original data
     map_gdf = gdf.copy()
@@ -141,6 +203,7 @@ def create_map(gdf):
         labels=['Low', 'Medium', 'High', 'Very High'],
         include_lowest=True
     )
+
     m = folium.Map(location=[-2.5, 118], zoom_start=5, tiles="CartoDB positron")
     folium.Choropleth(
         geo_data=map_gdf,
@@ -154,25 +217,51 @@ def create_map(gdf):
         name='Predicted Cases',
         nan_fill_color='lightgray'
     ).add_to(m)
-    # Enhanced popup HTML with risk level and better styling
-    map_gdf['popup_html'] = map_gdf.apply(
-        lambda row: f"""
+
+    # Enhanced popup HTML with risk level, better styling, AND WEATHER
+    def generate_popup_html(row):
+        region_name = row.get('kabupaten_standard', row['NAME_2'])
+        html = f"""
         <div style="font-family: Arial, sans-serif; min-width: 250px;">
-            <h4 style="margin-bottom: 10px; color: #2c3e50;">📍 {row.get('kabupaten_standard', row['NAME_2'])}</h4>
+            <h4 style="margin-bottom: 10px; color: #2c3e50;">📍 {region_name}</h4>
             <div style="border-left: 4px solid #e74c3c; padding-left: 12px; background-color: #f8f9fa; padding: 10px; border-radius: 5px;">
                 <p style="margin: 5px 0;"><strong>📅 Forecast Week:</strong> {row['forecast_week_str']}</p>
                 <p style="margin: 5px 0;"><strong>🦟 Predicted Cases:</strong> {int(row['predicted_cases_numeric'])}</p>
                 <p style="margin: 5px 0;"><strong>👥 Population:</strong> {int(row['population_numeric']):,} {'' if not pd.isna(row['population_numeric']) else 'N/A'}</p>
                 <p style="margin: 5px 0;"><strong>📊 Incidence Rate:</strong> {row['incidence_rate']:.2f}/100k</p>
-                <p style="margin: 5px 0;"><strong>⚠️ Risk Level:</strong> 
+                <p style="margin: 5px 0;"><strong>⚠️ Risk Level:</strong>
                     <span style="color: {'#e74c3c' if row['risk_level'] in ['High', 'Very High'] else '#f39c12' if row['risk_level'] == 'Medium' else '#27ae60'}; font-weight: bold;">
                         {row['risk_level']}
                     </span>
                 </p>
+                <!-- NEW: Weather Section -->
+                <p style="margin: 5px 0; padding-top: 10px; border-top: 1px dashed #ccc;">
+                    <strong>🌤️ Current Weather:</strong><br>
+        """
+        # Add weather data if available
+        if region_weather_data and isinstance(region_weather_data, dict):
+            weather_info = region_weather_data.get(region_name)
+            if weather_info:
+                html += f"""
+                    {weather_info['temperature']:.1f}°C ({weather_info['description']})<br>
+                    <small>💧 Humidity: {weather_info['humidity']}% | Feels like: {weather_info['feels_like']:.1f}°C</small>
+                """
+            else:
+                # Try fallback to major city weather if direct lookup fails
+                # This is a simple heuristic and might not be perfect
+                html += "Weather data for this region is unavailable."
+        else:
+             html += "Weather data currently unavailable."
+
+        html += """
+                </p>
             </div>
         </div>
-        """, axis=1
-    )
+        """
+        return html
+
+    map_gdf['popup_html'] = map_gdf.apply(generate_popup_html, axis=1)
+
     folium.GeoJson(
         map_gdf,
         style_function=lambda x: {'fillColor': 'transparent', 'color': 'transparent', 'weight': 0},
@@ -180,6 +269,7 @@ def create_map(gdf):
         popup=folium.features.GeoJsonPopup(fields=['popup_html'], aliases=[''])
     ).add_to(m)
     return m
+
 def create_trend_chart(forecast_data):
     """Create a trend chart showing national forecast over time."""
     if forecast_data is None or forecast_data.empty:
@@ -213,14 +303,17 @@ def create_trend_chart(forecast_data):
         hovermode='x unified'
     )
     return fig
+
 # --- Main App Layout ---
 st.title("🇮🇩 EWARS-ID: Enhanced Dengue Forecast Dashboard")
 st.markdown("*An operational prototype for near real-time dengue fever forecasting by M Arief Widagdo*")
+
 # Configuration
 OWNER = "AriefWidagdo"
 PRIVATE_REPO_NAME = "data-raw"
 FORECAST_FILE_PATH = "january_2024_predictions.csv"
 GEOJSON_PATH = "gadm41_IDN_2.json"
+
 # --- Load Data Once ---
 if st.session_state.loaded_data is None or st.session_state.loaded_forecast is None:
     with st.spinner("🔄 Loading data from GitHub..."):
@@ -230,6 +323,7 @@ if st.session_state.loaded_data is None or st.session_state.loaded_forecast is N
 else:
     merged_data = st.session_state.loaded_data
     forecast_data = st.session_state.loaded_forecast
+
 if merged_data is not None and forecast_data is not None:
     unique_dates = sorted(forecast_data['Date'].unique())
     if unique_dates:
@@ -255,9 +349,21 @@ if merged_data is not None and forecast_data is not None:
         selected_date = None
         map_ready_gdf = merged_data.copy()
 
+    # --- Fetch Weather Data for Regions ---
+    region_weather_data = None
+    if st.session_state.weather_data is None:
+        with st.spinner("🌦️ Loading regional weather data..."):
+            # Prepare list of regions with centroids for weather API
+            region_list = map_ready_gdf[['kabupaten_standard', 'lat', 'lon']].rename(columns={'kabupaten_standard': 'name'}).to_dict('records')
+            region_weather_data = get_weather_data(region_list)
+            st.session_state.weather_data = region_weather_data
+    else:
+        region_weather_data = st.session_state.weather_data
+
+
     # --- Main Map Section (MOVED UP) ---
     st.subheader(f"🗺️ Interactive Risk Map - {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'}")
-    map_object = create_map(map_ready_gdf)
+    map_object = create_map(map_ready_gdf, region_weather_data) # Pass weather data
     st_folium(
         map_object,
         width='100%',
@@ -271,8 +377,8 @@ if merged_data is not None and forecast_data is not None:
     if selected_date:
         # Use forecast_data directly for more reliable filtering
         summary_data = forecast_data[
-            (forecast_data['Date'] == selected_date) & 
-            (forecast_data['predicted_cases'].notna()) & 
+            (forecast_data['Date'] == selected_date) &
+            (forecast_data['predicted_cases'].notna()) &
             (forecast_data['population'].notna())
         ].copy()
         if not summary_data.empty:
@@ -340,12 +446,14 @@ if merged_data is not None and forecast_data is not None:
                 st.warning("⚠️ No valid numeric data available for calculations on the selected date.")
         else:
             st.info("ℹ️ No forecast data available for the selected date.")
+
     # --- NATIONAL TREND CHART (MOVED DOWN) ---
     if not forecast_data.empty:
         st.subheader("📈 National Forecast Trend")
         trend_fig = create_trend_chart(forecast_data)
         if trend_fig:
             st.plotly_chart(trend_fig, use_container_width=True)
+
     # --- Sidebar Controls ---
     with st.sidebar:
         st.header("🎛️ Dashboard Controls")
@@ -353,24 +461,24 @@ if merged_data is not None and forecast_data is not None:
         st.subheader("🌤️ Weather Information")
         if st.button("Refresh Weather Data", help="Update current weather conditions"):
             with st.spinner("Fetching weather data..."):
-                st.session_state.weather_data = get_weather_data()
-        # Display weather if available
-        weather_data = st.session_state.weather_data or get_weather_data()
-        if weather_data is not None and not weather_data.empty:
-            st.success("Weather data loaded successfully!")
-            for _, row in weather_data.iterrows():
-                with st.container():
-                    st.metric(
-                        label=f"🏙️ {row['city']}",
-                        value=f"{row['temperature']:.1f}°C",
-                        delta=f"Feels like {row['feels_like']:.1f}°C"
-                    )
-                    st.caption(f"💧 {row['humidity']}% humidity • {row['description']}")
+                # Prepare list of regions with centroids for weather API
+                region_list = map_ready_gdf[['kabupaten_standard', 'lat', 'lon']].rename(columns={'kabupaten_standard': 'name'}).to_dict('records')
+                st.session_state.weather_data = get_weather_data(region_list) # Refresh session state
+                region_weather_data = st.session_state.weather_data # Update local variable for map refresh
+                # Force map refresh by updating session state or key
+                st.rerun() # This will reload the page, refreshing the map with new data
+
+        # Display weather status (summary or error)
+        if region_weather_data is not None and isinstance(region_weather_data, dict) and region_weather_data:
+            st.success(f"Weather data loaded for {len(region_weather_data)} regions!")
+            # Optionally, display a summary or sample of weather data
+            # For now, just a success message is shown
         else:
             if 'WEATHER_API_KEY' not in st.secrets:
                 st.info("Add `WEATHER_API_KEY` to secrets to enable weather data")
             else:
-                st.warning("Weather data currently unavailable")
+                st.warning("Weather data currently unavailable or still loading.")
+
         st.markdown("---")
         # Region analysis
         st.subheader("🔍 Region Analysis")
@@ -404,6 +512,20 @@ if merged_data is not None and forecast_data is not None:
                         current_incidence = current_data['incidence_rate'].iloc[0]
                         st.metric("🦟 Cases This Week", f"{current_cases:.0f}")
                         st.metric("📊 Incidence Rate", f"{current_incidence:.2f}/100k")
+
+                        # --- NEW: Display Weather for Selected Region in Sidebar ---
+                        if region_weather_data and isinstance(region_weather_data, dict):
+                            region_weather = region_weather_data.get(selected_kabupaten)
+                            if region_weather:
+                                st.markdown("🌤️ **Current Weather:**")
+                                col1, col2 = st.columns(2)
+                                col1.metric("🌡️ Temperature", f"{region_weather['temperature']:.1f}°C")
+                                col2.metric("💧 Humidity", f"{region_weather['humidity']}%")
+                                st.caption(f"Feels like {region_weather['feels_like']:.1f}°C • {region_weather['description']}")
+                            else:
+                                st.info(f"Weather data for {selected_kabupaten} not available.")
+                        # --- END NEW WEATHER DISPLAY ---
+
                     # Mini trend chart
                     chart_df = trajectory_df[['Date', 'predicted_cases']].set_index('Date')
                     st.line_chart(chart_df, height=200)
@@ -476,6 +598,7 @@ if merged_data is not None and forecast_data is not None:
             st.info("ℹ️ No data available for the selected date.")
 else:
     st.error("❌ Data files could not be loaded. Please check deployment logs for more information.")
+
 # --- Footer ---
 st.markdown("---")
 st.markdown(
@@ -485,6 +608,6 @@ st.markdown(
         <p>Developed by M Arief Widagdo • Enhanced with weather integration and advanced analytics</p>
         <p>🦟 Dengue Fever Early Warning and Response System for Indonesia 🇮🇩</p>
     </div>
-    """, 
+    """,
     unsafe_allow_html=True
 )
