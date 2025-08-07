@@ -1,7 +1,7 @@
 # File: streamlit_app.py
 # The "Face" of the EWARS-ID system - Enhanced Production Version
-# Enhanced with better summary metrics, weather integration, and improved features
-# Includes weather data in map popups
+# Enhanced with better summary metrics, PAST weather integration, and improved features
+# Includes PAST weather data (1 month ago) in map popups and sidebar
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -14,6 +14,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
+
+# Attempt to import dateutil for better month subtraction
+try:
+    from dateutil.relativedelta import relativedelta
+    HAS_DATEUTIL = True
+except ImportError:
+    HAS_DATEUTIL = False
+    st.warning("The `python-dateutil` library is not installed. Using approximate month calculation.")
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -28,7 +36,7 @@ if 'loaded_data' not in st.session_state:
 if 'loaded_forecast' not in st.session_state:
     st.session_state.loaded_forecast = None
 if 'weather_data' not in st.session_state:
-    st.session_state.weather_data = None
+    st.session_state.weather_data = None # This will now be a dict {region_name: {date: weather_info}}
 
 # --- Helper Function for Name Standardization ---
 @st.cache_data
@@ -46,62 +54,87 @@ def standardize_name(name):
             name_lower = name_lower.replace(prefix, '', 1).strip()
     return re.sub(r'[^a-z0-9]', '', name_lower)
 
-# --- Weather Data Function (Modified to fetch for regions) ---
+# --- Weather Data Function (Modified to fetch PAST weather for a specific date) ---
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def get_weather_data(region_centroids=None):
+def get_weather_data(region_centroids=None, target_date=None):
     """
-    Fetch weather data for a list of region centroids.
-    If region_centroids is None, fetches for major Indonesian cities (fallback).
+    Fetch PAST weather data for a list of region centroids for a specific date (1 month ago).
+    If region_centroids is None or target_date is None, returns an empty dict.
     """
+    if not region_centroids or target_date is None:
+        return {}
+
     try:
-        # Get API key from secrets, with fallback
         api_key = st.secrets.get("WEATHER_API_KEY", "")
         if not api_key:
-            return None
+            st.warning("Weather API key not found in secrets.")
+            return {}
 
-        # Determine the list of locations to fetch weather for
-        if region_centroids is None:
-            # Fallback to major cities if no centroids provided
-            locations = [
-                {"name": "Jakarta", "lat": -6.2088, "lon": 106.8456},
-                {"name": "Surabaya", "lat": -7.2575, "lon": 112.7521},
-                {"name": "Medan", "lat": 3.5952, "lon": 98.6722},
-                {"name": "Bandung", "lat": -6.9175, "lon": 107.6191},
-                {"name": "Makassar", "lat": -5.1477, "lon": 119.4327}
-            ]
+        # Calculate the date one month ago
+        if HAS_DATEUTIL:
+            try:
+                past_date = target_date - relativedelta(months=1)
+            except Exception:
+                # Fallback if relativedelta fails for some reason
+                past_date = target_date - timedelta(days=30)
         else:
-            # Use provided region centroids
-            locations = region_centroids
+            # Approximate 1 month as 30 days
+            past_date = target_date - timedelta(days=30)
 
-        weather_data = []
-        for location in locations:
-            # Basic validation to prevent API errors
+        # Convert past_date to Unix timestamp (API expects UTC timestamp)
+        # API expects timestamp at 00:00 UTC of the target day for historical data
+        past_date_utc_start = datetime(past_date.year, past_date.month, past_date.day)
+        timestamp = int(past_date_utc_start.timestamp())
+
+        weather_data = {}
+        for location in region_centroids:
+            region_name = location['name']
             try:
                 lat = float(location['lat'])
                 lon = float(location['lon'])
-            except (ValueError, TypeError):
-                st.warning(f"Invalid coordinates for {location.get('name', 'Unknown')}: lat={location.get('lat')}, lon={location.get('lon')}")
+            except (ValueError, TypeError, KeyError):
+                st.warning(f"Invalid coordinates for {region_name}: lat={location.get('lat')}, lon={location.get('lon')}")
                 continue
 
-            url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+            # Use One Call API 3.0 Timemachine endpoint for historical data
+            url = f"http://api.openweathermap.org/data/3.0/onecall/timemachine?lat={lat}&lon={lon}&dt={timestamp}&appid={api_key}&units=metric"
+            
             try:
-                response = requests.get(url, timeout=10) # Increased timeout slightly
+                response = requests.get(url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-                    weather_data.append({
-                        'region_name': location['name'], # Use 'region_name' for clarity
-                        'temperature': data['main']['temp'],
-                        'humidity': data['main']['humidity'],
-                        'description': data['weather'][0]['description'].title(),
-                        'feels_like': data['main']['feels_like']
-                    })
-                else:
-                    st.warning(f"Failed to fetch weather for {location['name']} (Status {response.status_code})")
-            except requests.exceptions.RequestException as e:
-                st.error(f"Network error fetching weather for {location['name']}: {e}")
+                    # The timemachine API returns hourly data for the requested day
+                    # We'll take the data closest to noon (12:00) if available, otherwise the first entry
+                    hourly_data = data.get('data', [])
+                    if hourly_data:
+                        # Find the entry closest to noon (index 12 if hourly from 00:00)
+                        # A simple approach: take the first entry (00:00 data) or find noon
+                        target_hour_index = min(range(len(hourly_data)), key=lambda i: abs(hourly_data[i].get('dt', 0) - (timestamp + 12*3600)))
+                        selected_hour = hourly_data[target_hour_index]
 
-        # Return as dictionary for easy lookup by region name
-        return {item['region_name']: item for item in weather_data} if weather_data else {}
+                        weather_data[region_name] = {
+                            'region_name': region_name,
+                            'temperature': selected_hour['temp'],
+                            'humidity': selected_hour['humidity'],
+                            'description': selected_hour['weather'][0]['description'].title() if selected_hour.get('weather') else 'N/A',
+                            'feels_like': selected_hour.get('feels_like', selected_hour['temp']), # feels_like might not be in historical
+                            'weather_date': past_date.strftime('%Y-%m-%d') # Store the date for display
+                        }
+                    else:
+                        st.warning(f"No hourly weather data found for {region_name} on {past_date.strftime('%Y-%m-%d')}")
+                elif response.status_code == 401:
+                    st.error("Invalid API key for OpenWeatherMap or access to historical data not available with your subscription.")
+                    return {} # Stop trying if auth fails
+                else:
+                    st.warning(f"Failed to fetch weather for {region_name} (Status {response.status_code}): {response.text}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Network error fetching weather for {region_name}: {e}")
+            except KeyError as e:
+                st.error(f"Unexpected data structure in weather response for {region_name}: Missing key {e}")
+            except Exception as e:
+                st.error(f"Error processing weather data for {region_name}: {e}")
+
+        return weather_data
     except Exception as e:
         st.error(f"Error in get_weather_data: {e}")
         return {}
@@ -175,10 +208,10 @@ def load_data(owner, repo, forecast_path, geojson_path):
         st.error(f"FATAL ERROR: An error occurred during data loading or processing: {e}")
         return None, None
 
-def create_map(gdf, region_weather_data=None):
+def create_map(gdf, region_weather_data=None, weather_date_str="N/A"):
     """
     Creates the Folium map with a choropleth layer and popups.
-    Enhanced version with better styling, risk levels, AND REGIONAL WEATHER.
+    Enhanced version with better styling, risk levels, AND REGIONAL PAST WEATHER.
     """
     # Work on a copy to avoid modifying the original data
     map_gdf = gdf.copy()
@@ -218,7 +251,7 @@ def create_map(gdf, region_weather_data=None):
         nan_fill_color='lightgray'
     ).add_to(m)
 
-    # Enhanced popup HTML with risk level, better styling, AND WEATHER
+    # Enhanced popup HTML with risk level, better styling, AND PAST WEATHER
     def generate_popup_html(row):
         region_name = row.get('kabupaten_standard', row['NAME_2'])
         html = f"""
@@ -234,9 +267,9 @@ def create_map(gdf, region_weather_data=None):
                         {row['risk_level']}
                     </span>
                 </p>
-                <!-- NEW: Weather Section -->
+                <!-- NEW: PAST Weather Section -->
                 <p style="margin: 5px 0; padding-top: 10px; border-top: 1px dashed #ccc;">
-                    <strong>🌤️ Current Weather:</strong><br>
+                    <strong>🌤️ Weather (1 Month Ago - {weather_date_str}):</strong><br>
         """
         # Add weather data if available
         if region_weather_data and isinstance(region_weather_data, dict):
@@ -244,11 +277,9 @@ def create_map(gdf, region_weather_data=None):
             if weather_info:
                 html += f"""
                     {weather_info['temperature']:.1f}°C ({weather_info['description']})<br>
-                    <small>💧 Humidity: {weather_info['humidity']}% | Feels like: {weather_info['feels_like']:.1f}°C</small>
+                    <small>💧 Humidity: {weather_info['humidity']}%</small>
                 """
             else:
-                # Try fallback to major city weather if direct lookup fails
-                # This is a simple heuristic and might not be perfect
                 html += "Weather data for this region is unavailable."
         else:
              html += "Weather data currently unavailable."
@@ -349,21 +380,42 @@ if merged_data is not None and forecast_data is not None:
         selected_date = None
         map_ready_gdf = merged_data.copy()
 
-    # --- Fetch Weather Data for Regions ---
+    # --- Fetch PAST Weather Data for Regions ---
     region_weather_data = None
-    if st.session_state.weather_data is None:
-        with st.spinner("🌦️ Loading regional weather data..."):
-            # Prepare list of regions with centroids for weather API
-            region_list = map_ready_gdf[['kabupaten_standard', 'lat', 'lon']].rename(columns={'kabupaten_standard': 'name'}).to_dict('records')
-            region_weather_data = get_weather_data(region_list)
-            st.session_state.weather_data = region_weather_data
+    weather_date_str = "N/A"
+    if selected_date:
+        # Calculate the weather date (1 month ago)
+        if HAS_DATEUTIL:
+            try:
+                weather_date = selected_date - relativedelta(months=1)
+            except Exception:
+                weather_date = selected_date - timedelta(days=30)
+        else:
+            weather_date = selected_date - timedelta(days=30)
+        weather_date_str = weather_date.strftime('%Y-%m-%d')
+
+        # Check if weather data for this date is already cached
+        cache_key = f"weather_{weather_date_str}"
+        if st.session_state.weather_data is None or cache_key not in st.session_state.weather_data:
+            with st.spinner(f"🌦️ Loading regional weather data for {weather_date_str}..."):
+                # Prepare list of regions with centroids for weather API
+                region_list = map_ready_gdf[['kabupaten_standard', 'lat', 'lon']].rename(columns={'kabupaten_standard': 'name'}).to_dict('records')
+                fetched_weather_data = get_weather_data(region_list, selected_date) # Pass the selected_date for calculation
+                # Store in session state under the date key
+                if st.session_state.weather_data is None:
+                    st.session_state.weather_data = {}
+                st.session_state.weather_data[cache_key] = fetched_weather_data
+                region_weather_data = fetched_weather_data
+        else:
+            region_weather_data = st.session_state.weather_data[cache_key]
     else:
-        region_weather_data = st.session_state.weather_data
+        region_weather_data = {}
 
 
     # --- Main Map Section (MOVED UP) ---
     st.subheader(f"🗺️ Interactive Risk Map - {selected_date.strftime('%Y-%m-%d') if selected_date else 'N/A'}")
-    map_object = create_map(map_ready_gdf, region_weather_data) # Pass weather data
+    # Pass weather data and the calculated weather date string
+    map_object = create_map(map_ready_gdf, region_weather_data, weather_date_str)
     st_folium(
         map_object,
         width='100%',
@@ -446,7 +498,6 @@ if merged_data is not None and forecast_data is not None:
                 st.warning("⚠️ No valid numeric data available for calculations on the selected date.")
         else:
             st.info("ℹ️ No forecast data available for the selected date.")
-
     # --- NATIONAL TREND CHART (MOVED DOWN) ---
     if not forecast_data.empty:
         st.subheader("📈 National Forecast Trend")
@@ -458,26 +509,35 @@ if merged_data is not None and forecast_data is not None:
     with st.sidebar:
         st.header("🎛️ Dashboard Controls")
         # Weather data section
-        st.subheader("🌤️ Weather Information")
-        if st.button("Refresh Weather Data", help="Update current weather conditions"):
-            with st.spinner("Fetching weather data..."):
+        st.subheader("🌤️ Weather Information (1 Month Ago)")
+        if selected_date and st.button("Refresh Weather Data", help=f"Update weather conditions for {weather_date_str}"):
+            with st.spinner(f"Fetching weather data for {weather_date_str}..."):
                 # Prepare list of regions with centroids for weather API
                 region_list = map_ready_gdf[['kabupaten_standard', 'lat', 'lon']].rename(columns={'kabupaten_standard': 'name'}).to_dict('records')
-                st.session_state.weather_data = get_weather_data(region_list) # Refresh session state
-                region_weather_data = st.session_state.weather_data # Update local variable for map refresh
-                # Force map refresh by updating session state or key
-                st.rerun() # This will reload the page, refreshing the map with new data
+                # Force refresh by clearing cache for this date
+                cache_key = f"weather_{weather_date_str}"
+                if st.session_state.weather_data is not None and cache_key in st.session_state.weather_data:
+                     del st.session_state.weather_data[cache_key]
+                fetched_weather_data = get_weather_data(region_list, selected_date)
+                if st.session_state.weather_data is None:
+                    st.session_state.weather_data = {}
+                st.session_state.weather_data[cache_key] = fetched_weather_data
+                region_weather_data = fetched_weather_data # Update local variable for immediate use
+                st.success(f"Weather data refreshed for {weather_date_str}!")
+                # Note: st.rerun() might be needed if the map doesn't update automatically, but often Streamlit handles it.
 
         # Display weather status (summary or error)
         if region_weather_data is not None and isinstance(region_weather_data, dict) and region_weather_data:
-            st.success(f"Weather data loaded for {len(region_weather_data)} regions!")
+            st.success(f"PAST Weather data loaded for {len(region_weather_data)} regions (Date: {weather_date_str})!")
             # Optionally, display a summary or sample of weather data
             # For now, just a success message is shown
         else:
             if 'WEATHER_API_KEY' not in st.secrets:
                 st.info("Add `WEATHER_API_KEY` to secrets to enable weather data")
+            elif selected_date:
+                st.warning(f"PAST Weather data currently unavailable for {weather_date_str}.")
             else:
-                st.warning("Weather data currently unavailable or still loading.")
+                st.info("Select a forecast date to load weather data.")
 
         st.markdown("---")
         # Region analysis
@@ -494,7 +554,7 @@ if merged_data is not None and forecast_data is not None:
             if selected_kabupaten != st.session_state.get('selected_kabupaten'):
                 st.session_state.selected_kabupaten = selected_kabupaten
             # Region-specific analysis
-            if selected_kabupaten:
+            if selected_kabupaten and selected_date:
                 trajectory_df = forecast_data[forecast_data['kabupaten_standard'] == selected_kabupaten].copy()
                 if not trajectory_df.empty:
                     st.markdown(f"### 📊 {selected_kabupaten}")
@@ -513,17 +573,17 @@ if merged_data is not None and forecast_data is not None:
                         st.metric("🦟 Cases This Week", f"{current_cases:.0f}")
                         st.metric("📊 Incidence Rate", f"{current_incidence:.2f}/100k")
 
-                        # --- NEW: Display Weather for Selected Region in Sidebar ---
+                        # --- NEW: Display PAST Weather for Selected Region in Sidebar ---
                         if region_weather_data and isinstance(region_weather_data, dict):
                             region_weather = region_weather_data.get(selected_kabupaten)
                             if region_weather:
-                                st.markdown("🌤️ **Current Weather:**")
+                                st.markdown(f"🌤️ **Weather (1 Month Ago - {region_weather['weather_date']}):**")
                                 col1, col2 = st.columns(2)
                                 col1.metric("🌡️ Temperature", f"{region_weather['temperature']:.1f}°C")
                                 col2.metric("💧 Humidity", f"{region_weather['humidity']}%")
-                                st.caption(f"Feels like {region_weather['feels_like']:.1f}°C • {region_weather['description']}")
+                                st.caption(f"{region_weather['description']}")
                             else:
-                                st.info(f"Weather data for {selected_kabupaten} not available.")
+                                st.info(f"Weather data for {selected_kabupaten} on {weather_date_str} not available.")
                         # --- END NEW WEATHER DISPLAY ---
 
                     # Mini trend chart
@@ -605,7 +665,7 @@ st.markdown(
     """
     <div style='text-align: center; color: #666; padding: 20px;'>
         <p><strong>EWARS-ID Enhanced Dashboard</strong></p>
-        <p>Developed by M Arief Widagdo • Enhanced with weather integration and advanced analytics</p>
+        <p>Developed by M Arief Widagdo • Enhanced with PAST weather integration and advanced analytics</p>
         <p>🦟 Dengue Fever Early Warning and Response System for Indonesia 🇮🇩</p>
     </div>
     """,
